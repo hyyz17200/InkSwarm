@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-import copy
 import os
-import shutil
 import sys
 import ctypes
 
 
-from PySide6.QtCore import Qt, QUrl, QSize, QTimer
+from PySide6.QtCore import Qt, QUrl, QTimer
 from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -41,16 +39,13 @@ from PySide6.QtWidgets import (
 
 from .config_store import ConfigStore
 from .controller import PrintController
+from .cache_service import CacheService
 from .local_logger import LocalLogWriter
-from .models import RunOptions, SUPPORTED_INPUT_SUFFIXES, TaskItem, TaskStatusMessage, WorkerConfig, WorkerStatusMessage
-from .printui import (
-    open_printer_preferences,
-    open_printer_properties,
-    restore_printer_settings,
-    save_printer_settings,
-)
-from .task_inspector import TaskInspectionError, build_preview_file, inspect_task_input
-from .debug_logger import debug_exception, debug_log, initialize_debug_logging, install_qt_message_handler
+from .models import SUPPORTED_INPUT_SUFFIXES, TaskItem, TaskStatusMessage, WorkerConfig, WorkerStatusMessage
+from .run_service import RunService
+from .task_service import TaskService
+from .worker_service import WorkerService
+from .debug_logger import debug_log, initialize_debug_logging, install_qt_message_handler
 
 
 APP_NAME = "InkSwarm"
@@ -108,6 +103,10 @@ class MainWindow(QMainWindow):
         self.root_dir = get_app_root()
         self._apply_app_icon()
         self.store = ConfigStore(self.root_dir)
+        self.task_service = TaskService(self.store)
+        self.worker_service = WorkerService(self.store)
+        self.run_service = RunService()
+        self.cache_service = CacheService(self.store.paths.cache_dir, self.store.paths.preview_dir)
         self.controller = PrintController(self.store.paths.cache_dir, self.store.paths.statistics_dir)
         self.controller.signals.log.connect(self.on_log)
         self.controller.signals.task_status.connect(self.on_task_status)
@@ -471,7 +470,7 @@ class MainWindow(QMainWindow):
         self.app_settings["rip_limit_ppi"] = int(rip_limit_spin.value())
         self.store.save_app_settings(self.app_settings)
         if not new_save_tasks:
-            self.store.clear_task_session()
+            self.task_service.clear_session()
         self.apply_ui_scale(new_scale)
 
     def open_help_dialog(self) -> None:
@@ -627,7 +626,7 @@ class MainWindow(QMainWindow):
             pass
 
     def refresh_worker_group_combo(self) -> None:
-        groups = self.store.list_worker_groups()
+        groups = self.worker_service.list_groups()
         self.worker_group_combo.blockSignals(True)
         self.worker_group_combo.clear()
         for name in groups:
@@ -650,25 +649,15 @@ class MainWindow(QMainWindow):
         self.reload_workers()
 
     def restore_task_session(self) -> None:
-        session_items = self.store.load_task_session()
-        if not session_items:
+        result = self.task_service.restore_saved_tasks(self.tasks)
+        if result.requested_count <= 0:
             return
-        files_to_add: list[Path] = []
-        copies_map: dict[Path, int] = {}
-        for item in session_items:
-            raw_path = item.get("file_path")
-            if not raw_path:
-                continue
-            path = Path(raw_path)
-            if path.exists() and path.suffix.lower() in SUPPORTED_INPUT_SUFFIXES:
-                files_to_add.append(path)
-                copies_map[path.resolve()] = max(1, int(item.get("copies", 1)))
-        self.add_files(files_to_add)
-        for task in self.tasks:
-            task.copies = copies_map.get(task.file_path.resolve(), task.copies)
         self.refresh_task_table()
-        if files_to_add:
-            self.on_log_text(f"已恢复 {len(files_to_add)} 个上次任务。")
+        for skipped in result.add_result.skipped:
+            self.on_log_text(f"跳过 {skipped.file_path.name}: {skipped.reason}")
+        if result.add_result.added_count:
+            self.on_log_text(f"已添加 {result.add_result.added_count} 个任务。")
+        self.on_log_text(f"已恢复 {result.requested_count} 个上次任务。")
 
     def pick_files(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
@@ -680,28 +669,12 @@ class MainWindow(QMainWindow):
         self.add_files([Path(f) for f in files])
 
     def add_files(self, files: list[Path]) -> None:
-        existing_paths = {task.file_path.resolve() for task in self.tasks}
-        added_count = 0
-        for path in files:
-            if not path.exists() or path.suffix.lower() not in SUPPORTED_INPUT_SUFFIXES:
-                continue
-            resolved = path.resolve()
-            if resolved in existing_paths:
-                continue
-            try:
-                inspection = inspect_task_input(resolved)
-            except TaskInspectionError as exc:
-                self.on_log_text(f"跳过 {resolved.name}: {exc}")
-                continue
-            task = TaskItem(file_path=resolved, display_size_mm=inspection.display_size_mm)
-            preview_path = build_preview_file(self.store.paths.preview_dir, task.task_id, inspection.preview_bytes)
-            task.preview_path = str(preview_path)
-            self.tasks.append(task)
-            existing_paths.add(resolved)
-            added_count += 1
+        result = self.task_service.add_files(self.tasks, files)
         self.refresh_task_table()
-        if added_count:
-            self.on_log_text(f"已添加 {added_count} 个任务。")
+        for skipped in result.skipped:
+            self.on_log_text(f"跳过 {skipped.file_path.name}: {skipped.reason}")
+        if result.added_count:
+            self.on_log_text(f"已添加 {result.added_count} 个任务。")
 
     def refresh_task_table(self) -> None:
         self.task_table.setRowCount(len(self.tasks))
@@ -738,21 +711,18 @@ class MainWindow(QMainWindow):
         self.update_task_preview()
 
     def on_task_copies_changed(self, task_id: str, value: int) -> None:
-        task = next((t for t in self.tasks if t.task_id == task_id), None)
-        if task is not None:
-            task.copies = int(value)
+        self.task_service.set_task_copies(self.tasks, task_id, value)
 
     def remove_selected_tasks(self) -> None:
-        rows = sorted({index.row() for index in self.task_table.selectedIndexes()}, reverse=True)
-        for row in rows:
-            self.tasks.pop(row)
+        rows = {index.row() for index in self.task_table.selectedIndexes()}
+        self.task_service.remove_rows(self.tasks, rows)
         self.refresh_task_table()
 
     def clear_tasks(self) -> None:
         if self.controller.is_running():
             QMessageBox.warning(self, "运行中", "请先停止当前流程。")
             return
-        self.tasks.clear()
+        self.task_service.clear(self.tasks)
         self.refresh_task_table()
 
     def set_selected_task_copies(self) -> None:
@@ -762,8 +732,7 @@ class MainWindow(QMainWindow):
         value, ok = QInputDialog.getInt(self, "份数", "输入份数", value=1, minValue=1, maxValue=9999)
         if not ok:
             return
-        for row in rows:
-            self.tasks[row].copies = value
+        self.task_service.set_rows_copies(self.tasks, rows, value)
         self.refresh_task_table()
 
     def _centered_widget(self, child: QWidget) -> QWidget:
@@ -775,7 +744,7 @@ class MainWindow(QMainWindow):
         return wrapper
 
     def reload_workers(self) -> None:
-        self.workers = self.store.load_workers(self.current_worker_group)
+        self.workers = self.worker_service.load_workers(self.current_worker_group)
         self.worker_table.setRowCount(len(self.workers))
         self.worker_row_by_name.clear()
         for row, worker in enumerate(self.workers):
@@ -825,7 +794,7 @@ class MainWindow(QMainWindow):
             worker.printer_name = printer_item.text().strip() if printer_item is not None else worker.printer_name
             worker.active_preset = preset_combo.currentText() if preset_combo is not None else worker.active_preset
             worker.weight = int(weight_box.value()) if weight_box is not None else worker.weight
-        self.store.save_workers(self.workers)
+        self.worker_service.save_workers(self.workers)
         self.on_log_text("Worker 配置已保存。")
 
     def _selected_worker(self) -> WorkerConfig | None:
@@ -836,11 +805,9 @@ class MainWindow(QMainWindow):
         return self.workers[row]
 
     def _restore_worker_preset_if_any(self, worker: WorkerConfig) -> None:
-        preset = worker.get_active_preset()
-        snapshot_path = worker.resolve_path(preset.printui_restore_file) if preset.printui_restore_file else None
-        if snapshot_path and snapshot_path.exists():
-            restore_printer_settings(worker.printer_name, snapshot_path)
-            self.on_log_text(f"已载入 {worker.name}/{preset.name} 的驱动快照。")
+        message = self.worker_service.restore_preset_if_any(worker)
+        if message:
+            self.on_log_text(message)
 
     def open_selected_worker_preferences(self) -> None:
         worker = self._selected_worker()
@@ -852,7 +819,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self._restore_worker_preset_if_any(worker)
-            open_printer_preferences(worker.printer_name)
+            self.worker_service.open_preferences(worker)
         except Exception as exc:
             QMessageBox.critical(self, "打开失败", str(exc))
 
@@ -865,7 +832,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "该 Worker 还没有填写打印机名称。")
             return
         try:
-            open_printer_properties(worker.printer_name)
+            self.worker_service.open_properties(worker)
         except Exception as exc:
             QMessageBox.critical(self, "打开失败", str(exc))
 
@@ -877,15 +844,10 @@ class MainWindow(QMainWindow):
         if not worker.printer_name:
             QMessageBox.warning(self, "提示", "该 Worker 还没有填写打印机名称。")
             return
-        preset = worker.get_active_preset()
-        snapshot_path = worker.resolve_path(preset.printui_restore_file) if preset.printui_restore_file else None
-        if snapshot_path is None:
-            snapshot_path = worker.directory / f"{preset.name}.dat"
-            preset.printui_restore_file = snapshot_path.name
         try:
-            save_printer_settings(worker.printer_name, snapshot_path)
-            self.store.save_worker(worker)
-            self.on_log_text(f"已导出 {worker.name}/{preset.name} 的驱动快照: {snapshot_path.name}")
+            preset_name = worker.get_active_preset().name
+            snapshot_path = self.worker_service.capture_snapshot(worker)
+            self.on_log_text(f"已导出 {worker.name}/{preset_name} 的驱动快照: {snapshot_path.name}")
         except Exception as exc:
             QMessageBox.critical(self, "导出失败", str(exc))
 
@@ -897,30 +859,16 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "请先添加任务。")
             return
         self.save_worker_settings()
-        tasks = copy.deepcopy(self.tasks)
-        workers = copy.deepcopy(self.workers)
-        for task in self.tasks:
-            task.status = "Waiting"
-            task.completed_copies = 0
-            task.assigned_summary = ""
-            task.error_message = ""
+        prepared = self.run_service.prepare_start(self.tasks, self.workers, self.app_settings)
+        self.task_service.reset_for_run(self.tasks)
         self.refresh_task_table()
-        self._spool_total = sum(max(0, int(task.copies)) for task in tasks)
+        self._spool_total = prepared.spool_total
         self.spool_progress_bar.setRange(0, max(1, self._spool_total))
         self.spool_progress_bar.setValue(0)
         self.spool_progress_bar.setFormat(f"已发送到 Spooler: 0 / {self._spool_total}")
-        run_options = RunOptions(
-            auto_orient_enabled=bool(self.app_settings.get("auto_orient_enabled", False)),
-            target_orientation=str(self.app_settings.get("target_orientation", "portrait") or "portrait").lower(),
-            ignore_margins=bool(self.app_settings.get("ignore_margins", True)),
-            worker_queue_limit_enabled=bool(self.app_settings.get("worker_queue_limit_enabled", False)),
-            worker_queue_limit=int(self.app_settings.get("worker_queue_limit", 3) or 3),
-            rip_limit_enabled=bool(self.app_settings.get("rip_limit_enabled", True)),
-            rip_limit_ppi=int(self.app_settings.get("rip_limit_ppi", 300) or 300),
-        )
-        debug_log(f"start_run with options={run_options} tasks={[(t.file_name(), t.copies) for t in tasks]}")
+        debug_log(f"start_run with options={prepared.run_options} tasks={[(t.file_name(), t.copies) for t in prepared.tasks]}")
         try:
-            self.controller.start(tasks, workers, run_options)
+            self.controller.start(prepared.tasks, prepared.workers, prepared.run_options)
         except Exception as exc:
             QMessageBox.critical(self, "启动失败", str(exc))
 
@@ -944,16 +892,9 @@ class MainWindow(QMainWindow):
         self.spool_progress_bar.setFormat(f"已发送到 Spooler: {int(sent)} / {self._spool_total}")
 
     def on_task_status(self, status: TaskStatusMessage) -> None:
-        task = next((t for t in self.tasks if t.task_id == status.task_id), None)
+        task = self.task_service.apply_status(self.tasks, status)
         if task is None:
             return
-        task.status = status.status
-        if status.completed_copies is not None:
-            task.completed_copies = status.completed_copies
-        if status.assigned_summary is not None:
-            task.assigned_summary = status.assigned_summary
-        if status.error_message is not None:
-            task.error_message = status.error_message
         self.refresh_task_row(task)
         if status.error_message:
             self.on_log_text(f"任务 {task.file_name()} 错误: {status.error_message}")
@@ -1030,10 +971,7 @@ class MainWindow(QMainWindow):
         self._open_path(self.root_dir)
 
     def clear_cache_dir(self, log_message: bool = True) -> None:
-        if self.store.paths.cache_dir.exists():
-            shutil.rmtree(self.store.paths.cache_dir, ignore_errors=True)
-        self.store.paths.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.store.paths.preview_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_service.clear()
         if log_message:
             self.on_log_text("缓存目录已清理。")
 
@@ -1052,9 +990,9 @@ class MainWindow(QMainWindow):
         self.app_settings["active_worker_group"] = self.current_worker_group
         self.store.save_app_settings(self.app_settings)
         if self.app_settings.get("save_tasks_on_exit", False):
-            self.store.save_task_session(self.tasks)
+            self.task_service.save_session(self.tasks)
         else:
-            self.store.clear_task_session()
+            self.task_service.clear_session()
         super().closeEvent(event)
 
 
