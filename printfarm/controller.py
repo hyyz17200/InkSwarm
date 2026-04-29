@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject, Signal
 
 from .models import LogMessage, RunOptions, TaskItem, TaskStatusMessage, WorkerConfig, WorkerStatusMessage, WorkerTaskBatch
 from .debug_logger import debug_exception, debug_log
+from .printer_access import PrinterAccessCoordinator
 from .printui import restore_printer_settings
 from .renderer import Renderer
 from .scheduler import WeightedScheduler
@@ -32,6 +33,7 @@ class WorkerRuntime(threading.Thread):
         job_queue: queue.Queue[WorkerTaskBatch | None],
         signals: ControllerSignals,
         renderer: Renderer,
+        printer_access: PrinterAccessCoordinator,
         progress_callback,
         stop_event: threading.Event,
         run_options: RunOptions,
@@ -41,6 +43,7 @@ class WorkerRuntime(threading.Thread):
         self.job_queue = job_queue
         self.signals = signals
         self.renderer = renderer
+        self.printer_access = printer_access
         self.progress_callback = progress_callback
         self.stop_event = stop_event
         self.run_options = run_options
@@ -77,11 +80,6 @@ class WorkerRuntime(threading.Thread):
     def _process_batch(self, batch: WorkerTaskBatch) -> None:
         preset = self.worker.get_active_preset()
         self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, f"Preparing {batch.task.file_name()} ×{batch.copies}"))
-        restore_file = self.worker.resolve_path(preset.printui_restore_file) if preset.printui_restore_file else None
-        if restore_file:
-            self.signals.log.emit(LogMessage("info", f"{self.worker.name}: 恢复驱动预设 {restore_file.name}"))
-            restore_printer_settings(self.worker.printer_name, restore_file)
-
         artifact = self.renderer.ensure_render_cache(batch.task, self.worker)
         self.signals.log.emit(
             LogMessage(
@@ -92,6 +90,7 @@ class WorkerRuntime(threading.Thread):
         self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, f"Printing {batch.task.file_name()} ×{batch.copies}"))
         debug_log(f"worker batch start worker={self.worker.name} printer={batch.printer_name} preset={preset.name} task={batch.task.file_name()} copies={batch.copies}")
         assert self.spooler is not None
+        restore_file = self.worker.resolve_path(preset.printui_restore_file) if preset.printui_restore_file else None
 
         def before_each_copy(current_copy: int, total_copies: int) -> None:
             if self.stop_event.is_set():
@@ -113,16 +112,29 @@ class WorkerRuntime(threading.Thread):
         def after_each_copy(current_copy: int, total_copies: int) -> None:
             self.progress_callback(batch.task.task_id, 1)
 
-        self.spooler.print_cached_pages(
-            printer_name=batch.printer_name,
-            page_paths=artifact.page_paths,
-            page_specs=artifact.metadata.get("pages", []),
-            job_name=batch.task.file_name(),
-            copies=batch.copies,
-            ignore_margins=self.run_options.ignore_margins,
-            before_each_copy=before_each_copy,
-            after_each_copy=after_each_copy,
-        )
+        def on_printer_wait() -> None:
+            self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, f"Waiting printer {batch.printer_name}"))
+            self.signals.log.emit(LogMessage("info", f"{self.worker.name}: 等待打印机 {batch.printer_name} 完成前一个受保护提交。"))
+
+        with self.printer_access.hold(
+            batch.printer_name,
+            owner=self.worker.name,
+            wait_callback=on_printer_wait,
+            stop_event=self.stop_event,
+        ):
+            if restore_file:
+                self.signals.log.emit(LogMessage("info", f"{self.worker.name}: 恢复驱动预设 {restore_file.name}"))
+                restore_printer_settings(self.worker.printer_name, restore_file)
+            self.spooler.print_cached_pages(
+                printer_name=batch.printer_name,
+                page_paths=artifact.page_paths,
+                page_specs=artifact.metadata.get("pages", []),
+                job_name=batch.task.file_name(),
+                copies=batch.copies,
+                ignore_margins=self.run_options.ignore_margins,
+                before_each_copy=before_each_copy,
+                after_each_copy=after_each_copy,
+            )
         debug_log(f"worker batch end worker={self.worker.name} task={batch.task.file_name()} copies={batch.copies}")
         self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, "Idle"))
 
@@ -180,6 +192,7 @@ class PrintController:
         )
         queues: dict[str, queue.Queue[WorkerTaskBatch | None]] = {}
         runtimes: list[WorkerRuntime] = []
+        printer_access = PrinterAccessCoordinator()
 
         try:
             for worker in workers:
@@ -192,6 +205,7 @@ class PrintController:
                     job_queue=q,
                     signals=self.signals,
                     renderer=renderer,
+                    printer_access=printer_access,
                     progress_callback=self._record_progress,
                     stop_event=self._stop_event,
                     run_options=run_options,
