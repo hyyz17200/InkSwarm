@@ -4,9 +4,10 @@ from pathlib import Path
 import os
 import sys
 import ctypes
+import threading
 
 
-from PySide6.QtCore import Qt, QUrl, QTimer
+from PySide6.QtCore import Qt, QUrl, QTimer, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -43,13 +44,14 @@ from .cache_service import CacheService
 from .local_logger import LocalLogWriter
 from .models import SUPPORTED_INPUT_SUFFIXES, TaskItem, TaskStatusMessage, WorkerConfig, WorkerStatusMessage
 from .run_service import RunService
+from .spooler_service import SpoolerMaintenance, SpoolerMaintenanceCancelled, run_elevated_spooler_maintenance
 from .task_service import TaskService
 from .worker_service import WorkerService
-from .debug_logger import debug_log, initialize_debug_logging, install_qt_message_handler
+from .debug_logger import debug_exception, debug_log, initialize_debug_logging, install_qt_message_handler
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.1.4"
+APP_VERSION = "0.1.6"
 DEBUG_LOG_NAME = "debug.log"
 
 
@@ -95,6 +97,9 @@ class FileDropTable(QTableWidget):
 
 
 class MainWindow(QMainWindow):
+    spooler_maintenance_log = Signal(str)
+    spooler_maintenance_finished = Signal(object)
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
@@ -114,6 +119,8 @@ class MainWindow(QMainWindow):
         self.controller.signals.run_state.connect(self.on_run_state_changed)
         self.controller.signals.pause_state.connect(self.on_pause_state_changed)
         self.controller.signals.spool_progress.connect(self.on_spool_progress)
+        self.spooler_maintenance_log.connect(self.on_log_text)
+        self.spooler_maintenance_finished.connect(self.on_spooler_maintenance_finished)
         self.log_writer = LocalLogWriter(self.store.paths.logs_dir)
         self.debug_log_path = (self.store.paths.logs_dir / DEBUG_LOG_NAME).resolve()
         debug_log(f"mainwindow init root_dir={self.root_dir}")
@@ -128,6 +135,7 @@ class MainWindow(QMainWindow):
         self.worker_row_by_name: dict[str, int] = {}
         self.current_preview_pixmap: QPixmap | None = None
         self._spool_total = 0
+        self._spooler_maintenance_active = False
 
         self._saved_ui_scale = int(self.app_settings.get("ui_scale", 100))
         self._ui_scale_applied_once = False
@@ -355,6 +363,10 @@ class MainWindow(QMainWindow):
         print_mgmt_action = QAction("启动打印管理器", self)
         print_mgmt_action.triggered.connect(self.open_print_management)
         menu.addAction(print_mgmt_action)
+
+        self.restart_spooler_action = QAction("重启打印队列", self)
+        self.restart_spooler_action.triggered.connect(self.restart_print_queue)
+        menu.addAction(self.restart_spooler_action)
 
         help_action = QAction("帮助", self)
         help_action.triggered.connect(self.open_help_dialog)
@@ -853,6 +865,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "导出失败", str(exc))
 
     def start_or_toggle_pause(self) -> None:
+        if self._spooler_maintenance_active:
+            QMessageBox.information(self, "处理中", "正在维护打印队列，完成前不会恢复发送。")
+            return
         if self.controller.is_running():
             self.controller.toggle_pause()
             return
@@ -880,6 +895,118 @@ class MainWindow(QMainWindow):
         if not self.controller.is_running():
             return
         self.controller.stop()
+
+    def restart_print_queue(self) -> None:
+        if self._spooler_maintenance_active:
+            QMessageBox.information(self, "处理中", "打印队列维护正在执行，请等待完成。")
+            return
+
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setWindowTitle("重启打印队列")
+        dialog.setText("此操作会暂停 InkSwarm，并重启 Windows Print Spooler。")
+        dialog.setInformativeText(
+            "已发送到 Windows 打印队列的任务不会由 InkSwarm 管理。"
+            "重启过程中所有打印机都可能短暂不可用。\n\n"
+            "此操作需要管理员权限。主窗口可以保持普通权限运行，InkSwarm 会在需要时临时请求管理员权限。"
+        )
+        restart_button = dialog.addButton("确认重启", QMessageBox.AcceptRole)
+        cancel_button = dialog.addButton("取消", QMessageBox.RejectRole)
+        dialog.setDefaultButton(cancel_button)
+        dialog.setEscapeButton(cancel_button)
+        dialog.exec()
+
+        clicked = dialog.clickedButton()
+        if clicked == restart_button:
+            self.start_spooler_maintenance()
+
+    def start_spooler_maintenance(self) -> None:
+        self._spooler_maintenance_active = True
+        self.restart_spooler_action.setEnabled(False)
+        was_running = self.controller.is_running()
+        if was_running:
+            self.on_log_text("准备维护打印队列，InkSwarm 正在暂停发送。")
+            self.controller.pause()
+        else:
+            self.on_log_text("准备维护打印队列。")
+
+        thread = threading.Thread(
+            target=self._run_spooler_maintenance,
+            args=(was_running,),
+            daemon=True,
+            name="SpoolerMaintenance",
+        )
+        thread.start()
+
+    def _run_spooler_maintenance(self, resume_after_success: bool) -> None:
+        try:
+            if resume_after_success:
+                self.spooler_maintenance_log.emit("等待 InkSwarm 暂停稳定。")
+                if not self.controller.wait_until_paused_idle(timeout_seconds=15.0):
+                    raise RuntimeError("InkSwarm 在 15 秒内未进入稳定暂停状态，未继续重启 Print Spooler。")
+                self.spooler_maintenance_log.emit("InkSwarm 已稳定暂停。")
+
+            if SpoolerMaintenance.is_process_elevated():
+                maintenance = SpoolerMaintenance(timeout_seconds=120.0)
+                result = maintenance.restart(
+                    log=lambda message: self.spooler_maintenance_log.emit(message),
+                )
+            else:
+                self.spooler_maintenance_log.emit("主窗口不是管理员权限，正在请求临时管理员权限执行 Print Spooler 维护。")
+                result = run_elevated_spooler_maintenance(
+                    timeout_seconds=120.0,
+                    log=lambda message: self.spooler_maintenance_log.emit(message),
+                )
+            self.spooler_maintenance_finished.emit(
+                {
+                    "ok": True,
+                    "resume_after_success": resume_after_success,
+                }
+            )
+        except SpoolerMaintenanceCancelled as exc:
+            self.spooler_maintenance_finished.emit(
+                {
+                    "ok": False,
+                    "cancelled": True,
+                    "was_running": resume_after_success,
+                    "error": str(exc),
+                }
+            )
+        except Exception as exc:
+            debug_exception("MainWindow._run_spooler_maintenance", exc)
+            self.spooler_maintenance_finished.emit(
+                {
+                    "ok": False,
+                    "was_running": resume_after_success,
+                    "error": str(exc),
+                }
+            )
+
+    def on_spooler_maintenance_finished(self, result: object) -> None:
+        self._spooler_maintenance_active = False
+        self.restart_spooler_action.setEnabled(True)
+
+        data = result if isinstance(result, dict) else {}
+        if data.get("ok"):
+            if data.get("resume_after_success") and self.controller.is_running():
+                self.controller.resume()
+            QMessageBox.information(self, "打印队列已恢复", "Windows Print Spooler 已重启完成。")
+            return
+
+        error = str(data.get("error") or "未知错误")
+        if data.get("cancelled"):
+            if data.get("was_running") and self.controller.is_running():
+                self.controller.resume()
+            QMessageBox.information(self, "已取消", error)
+            return
+        pause_text = ""
+        if data.get("was_running") and self.controller.is_running():
+            pause_text = "\n\nInkSwarm 已保持暂停状态，请确认后再选择恢复、停止或重新尝试。"
+        QMessageBox.warning(
+            self,
+            "打印队列维护失败",
+            f"{error}{pause_text}",
+        )
 
     def on_log(self, message) -> None:
         self.on_log_text(message.format())
@@ -994,6 +1121,10 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def closeEvent(self, event) -> None:
+        if self._spooler_maintenance_active:
+            QMessageBox.warning(self, "处理中", "正在维护打印队列，请等待完成后再退出。")
+            event.ignore()
+            return
         if self.controller.is_running():
             QMessageBox.warning(self, "运行中", "请先停止当前流程后再退出。")
             event.ignore()

@@ -66,6 +66,8 @@ class WorkerRuntime(threading.Thread):
         renderer: Renderer,
         printer_access: PrinterAccessCoordinator,
         progress_callback,
+        spool_send_start_callback,
+        spool_send_end_callback,
         stop_event: threading.Event,
         pause_gate: _PauseGate,
         run_options: RunOptions,
@@ -77,6 +79,8 @@ class WorkerRuntime(threading.Thread):
         self.renderer = renderer
         self.printer_access = printer_access
         self.progress_callback = progress_callback
+        self.spool_send_start_callback = spool_send_start_callback
+        self.spool_send_end_callback = spool_send_end_callback
         self.stop_event = stop_event
         self.pause_gate = pause_gate
         self.run_options = run_options
@@ -142,6 +146,7 @@ class WorkerRuntime(threading.Thread):
                     status_callback=lambda status: self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, status)),
                     log_callback=lambda msg: self.signals.log.emit(LogMessage("info", f"{self.worker.name}: {msg}")),
                     log_cooldown_seconds=60.0,
+                    pause_callback=lambda: self._wait_for_resume(f"Paused {batch.task.file_name()}"),
                 )
             if not self._wait_for_resume(f"Paused {batch.task.file_name()}"):
                 raise RuntimeError("已停止")
@@ -166,7 +171,7 @@ class WorkerRuntime(threading.Thread):
                 raise RuntimeError("已停止")
             if restore_file:
                 self.signals.log.emit(LogMessage("info", f"{self.worker.name}: 恢复驱动预设 {restore_file.name}"))
-                restore_printer_settings(self.worker.printer_name, restore_file)
+                self._run_spool_send(lambda: restore_printer_settings(self.worker.printer_name, restore_file))
             self.spooler.print_cached_pages(
                 printer_name=batch.printer_name,
                 page_paths=artifact.page_paths,
@@ -176,6 +181,8 @@ class WorkerRuntime(threading.Thread):
                 ignore_margins=self.run_options.ignore_margins,
                 before_each_copy=before_each_copy,
                 after_each_copy=after_each_copy,
+                before_send=lambda: self._begin_spool_send(batch.task.file_name()),
+                after_send=self.spool_send_end_callback,
             )
         debug_log(f"worker batch end worker={self.worker.name} task={batch.task.file_name()} copies={batch.copies}")
         self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, "Idle"))
@@ -185,6 +192,18 @@ class WorkerRuntime(threading.Thread):
             self.stop_event,
             on_pause=lambda: self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, paused_status)),
         )
+
+    def _begin_spool_send(self, paused_label: str) -> None:
+        if not self._wait_for_resume(f"Paused {paused_label}"):
+            raise RuntimeError("已停止")
+        self.spool_send_start_callback()
+
+    def _run_spool_send(self, callback) -> None:
+        self.spool_send_start_callback()
+        try:
+            callback()
+        finally:
+            self.spool_send_end_callback()
 
 
 class PrintController:
@@ -196,6 +215,8 @@ class PrintController:
         self._stop_event = threading.Event()
         self._pause_gate = _PauseGate()
         self._lock = threading.Lock()
+        self._spool_activity = threading.Condition()
+        self._active_spool_sends = 0
         self._task_targets: dict[str, int] = {}
         self._task_progress: dict[str, int] = defaultdict(int)
         self._task_started_at: dict[str, float] = {}
@@ -223,6 +244,8 @@ class PrintController:
         self._task_stats_recorded = set()
         self._spool_target = sum(max(0, int(task.copies)) for task in tasks)
         self._spool_progress = 0
+        with self._spool_activity:
+            self._active_spool_sends = 0
         self.signals.spool_progress.emit(0, self._spool_target)
         debug_log(f"controller start tasks={len(tasks)} workers={len(workers)} spool_target={self._spool_target} options={options}")
         self._thread = threading.Thread(target=self._run, args=(tasks, workers, options), daemon=True, name="PrintControllerMain")
@@ -290,6 +313,8 @@ class PrintController:
                     renderer=renderer,
                     printer_access=printer_access,
                     progress_callback=self._record_progress,
+                    spool_send_start_callback=self._begin_spool_send,
+                    spool_send_end_callback=self._end_spool_send,
                     stop_event=self._stop_event,
                     pause_gate=self._pause_gate,
                     run_options=run_options,
@@ -335,6 +360,35 @@ class PrintController:
             self._set_paused(False)
             self._emit_summary(tasks)
             self.signals.run_state.emit(False)
+
+    def _begin_spool_send(self) -> None:
+        with self._spool_activity:
+            self._active_spool_sends += 1
+            debug_log(f"controller active spool sends={self._active_spool_sends}")
+
+    def _end_spool_send(self) -> None:
+        with self._spool_activity:
+            self._active_spool_sends = max(0, self._active_spool_sends - 1)
+            debug_log(f"controller active spool sends={self._active_spool_sends}")
+            self._spool_activity.notify_all()
+
+    def wait_until_paused_idle(self, timeout_seconds: float = 15.0, quiet_seconds: float = 0.3) -> bool:
+        deadline = time.monotonic() + max(0.1, timeout_seconds)
+        quiet_started: float | None = None
+        while True:
+            with self._spool_activity:
+                active_sends = self._active_spool_sends
+            now = time.monotonic()
+            if active_sends <= 0:
+                if quiet_started is None:
+                    quiet_started = now
+                if now - quiet_started >= max(0.0, quiet_seconds):
+                    return True
+            else:
+                quiet_started = None
+            if now >= deadline:
+                return False
+            time.sleep(0.05)
 
     def _record_progress(self, task_id: str, copies_done: int) -> None:
         with self._lock:

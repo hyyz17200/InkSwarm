@@ -45,12 +45,15 @@ class PrinterSpooler:
         status_callback: Callable[[str], None] | None = None,
         log_callback: Callable[[str], None] | None = None,
         log_cooldown_seconds: float = 60.0,
+        pause_callback: Callable[[], bool] | None = None,
     ) -> None:
         if max_queue_jobs <= 0:
             self._queue_waiting_states.pop(printer_name, None)
             return
         while True:
             if stop_event is not None and stop_event.is_set():
+                raise RuntimeError("已停止")
+            if pause_callback is not None and not pause_callback():
                 raise RuntimeError("已停止")
             depth = self.get_queue_depth(printer_name)
             if depth < max_queue_jobs:
@@ -78,13 +81,21 @@ class PrinterSpooler:
         ignore_margins: bool = True,
         before_each_copy: Callable[[int, int], None] | None = None,
         after_each_copy: Callable[[int, int], None] | None = None,
+        before_send: Callable[[], None] | None = None,
+        after_send: Callable[[], None] | None = None,
     ) -> None:
         for copy_index in range(copies):
             if before_each_copy is not None:
                 before_each_copy(copy_index + 1, copies)
             effective_name = f"{job_name} [copy {copy_index + 1}/{copies}]"
             debug_log(f"spooler print start printer={printer_name} job={effective_name} pages={len(page_paths)} ignore_margins={ignore_margins}")
-            self._print_single_job(printer_name, page_paths, page_specs, effective_name, ignore_margins=ignore_margins)
+            if before_send is not None:
+                before_send()
+            try:
+                self._print_single_job(printer_name, page_paths, page_specs, effective_name, ignore_margins=ignore_margins)
+            finally:
+                if after_send is not None:
+                    after_send()
             debug_log(f"spooler print end printer={printer_name} job={effective_name}")
             if after_each_copy is not None:
                 after_each_copy(copy_index + 1, copies)
