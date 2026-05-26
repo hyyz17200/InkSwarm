@@ -23,7 +23,38 @@ class ControllerSignals(QObject):
     task_status = Signal(object)
     worker_status = Signal(object)
     run_state = Signal(bool)
+    pause_state = Signal(bool)
     spool_progress = Signal(int, int)
+
+
+class _PauseGate:
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def pause(self) -> None:
+        self._event.set()
+
+    def resume(self) -> None:
+        self._event.clear()
+
+    def is_paused(self) -> bool:
+        return self._event.is_set()
+
+    def wait_if_paused(
+        self,
+        stop_event: threading.Event,
+        poll_seconds: float = 0.2,
+        on_pause=None,
+    ) -> bool:
+        if not self._event.is_set():
+            return not stop_event.is_set()
+        if on_pause is not None:
+            on_pause()
+        while self._event.is_set():
+            if stop_event.is_set():
+                return False
+            time.sleep(max(0.05, poll_seconds))
+        return not stop_event.is_set()
 
 
 class WorkerRuntime(threading.Thread):
@@ -36,6 +67,7 @@ class WorkerRuntime(threading.Thread):
         printer_access: PrinterAccessCoordinator,
         progress_callback,
         stop_event: threading.Event,
+        pause_gate: _PauseGate,
         run_options: RunOptions,
     ) -> None:
         super().__init__(daemon=True, name=f"WorkerRuntime-{worker.name}")
@@ -46,6 +78,7 @@ class WorkerRuntime(threading.Thread):
         self.printer_access = printer_access
         self.progress_callback = progress_callback
         self.stop_event = stop_event
+        self.pause_gate = pause_gate
         self.run_options = run_options
         self.spooler: PrinterSpooler | None = None
 
@@ -60,6 +93,9 @@ class WorkerRuntime(threading.Thread):
                 break
             try:
                 if self.stop_event.is_set():
+                    self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, "Stopping"))
+                    continue
+                if not self._wait_for_resume("Paused"):
                     self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, "Stopping"))
                     continue
                 self._process_batch(batch)
@@ -95,6 +131,8 @@ class WorkerRuntime(threading.Thread):
         def before_each_copy(current_copy: int, total_copies: int) -> None:
             if self.stop_event.is_set():
                 raise RuntimeError("已停止")
+            if not self._wait_for_resume(f"Paused {batch.task.file_name()}"):
+                raise RuntimeError("已停止")
             if self.run_options.worker_queue_limit_enabled and self.run_options.worker_queue_limit > 0:
                 self.spooler.wait_until_queue_available(
                     printer_name=batch.printer_name,
@@ -105,6 +143,8 @@ class WorkerRuntime(threading.Thread):
                     log_callback=lambda msg: self.signals.log.emit(LogMessage("info", f"{self.worker.name}: {msg}")),
                     log_cooldown_seconds=60.0,
                 )
+            if not self._wait_for_resume(f"Paused {batch.task.file_name()}"):
+                raise RuntimeError("已停止")
             self.signals.worker_status.emit(
                 WorkerStatusMessage(self.worker.name, f"Printing {batch.task.file_name()} {current_copy}/{total_copies}")
             )
@@ -122,6 +162,8 @@ class WorkerRuntime(threading.Thread):
             wait_callback=on_printer_wait,
             stop_event=self.stop_event,
         ):
+            if not self._wait_for_resume(f"Paused {batch.task.file_name()}"):
+                raise RuntimeError("已停止")
             if restore_file:
                 self.signals.log.emit(LogMessage("info", f"{self.worker.name}: 恢复驱动预设 {restore_file.name}"))
                 restore_printer_settings(self.worker.printer_name, restore_file)
@@ -138,6 +180,12 @@ class WorkerRuntime(threading.Thread):
         debug_log(f"worker batch end worker={self.worker.name} task={batch.task.file_name()} copies={batch.copies}")
         self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, "Idle"))
 
+    def _wait_for_resume(self, paused_status: str) -> bool:
+        return self.pause_gate.wait_if_paused(
+            self.stop_event,
+            on_pause=lambda: self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, paused_status)),
+        )
+
 
 class PrintController:
     def __init__(self, cache_root: Path, statistics_root: Path | None = None) -> None:
@@ -146,6 +194,7 @@ class PrintController:
         self._statistics_writer = MonthlyStatisticsWriter(statistics_root or (cache_root.parent / "statistics"))
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._pause_gate = _PauseGate()
         self._lock = threading.Lock()
         self._task_targets: dict[str, int] = {}
         self._task_progress: dict[str, int] = defaultdict(int)
@@ -158,11 +207,15 @@ class PrintController:
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    def is_paused(self) -> bool:
+        return self._pause_gate.is_paused()
+
     def start(self, tasks: list[TaskItem], workers: list[WorkerConfig], run_options: RunOptions | None = None) -> None:
         if self.is_running():
             raise RuntimeError("当前已有流程正在运行")
         options = run_options or RunOptions()
         self._stop_event.clear()
+        self._set_paused(False, emit=False)
         self._task_targets = {task.task_id: task.copies for task in tasks}
         self._task_progress = defaultdict(int)
         self._task_started_at = {}
@@ -179,7 +232,37 @@ class PrintController:
     def stop(self) -> None:
         debug_log("controller stop requested")
         self._stop_event.set()
+        self._set_paused(False)
         self.signals.log.emit(LogMessage("warning", "收到停止请求，当前页完成后会结束。"))
+
+    def pause(self) -> None:
+        if not self.is_running() or self.is_paused():
+            return
+        debug_log("controller pause requested")
+        self._set_paused(True)
+        self.signals.log.emit(LogMessage("warning", "收到暂停请求，已发送任务继续，恢复前不再发送新任务。"))
+
+    def resume(self) -> None:
+        if not self.is_paused():
+            return
+        debug_log("controller resume requested")
+        self._set_paused(False)
+        self.signals.log.emit(LogMessage("info", "已恢复发送。"))
+
+    def toggle_pause(self) -> None:
+        if self.is_paused():
+            self.resume()
+        else:
+            self.pause()
+
+    def _set_paused(self, paused: bool, emit: bool = True) -> None:
+        was_paused = self._pause_gate.is_paused()
+        if paused:
+            self._pause_gate.pause()
+        else:
+            self._pause_gate.resume()
+        if emit and was_paused != paused:
+            self.signals.pause_state.emit(paused)
 
     def _run(self, tasks: list[TaskItem], workers: list[WorkerConfig], run_options: RunOptions) -> None:
         scheduler = WeightedScheduler()
@@ -208,6 +291,7 @@ class PrintController:
                     printer_access=printer_access,
                     progress_callback=self._record_progress,
                     stop_event=self._stop_event,
+                    pause_gate=self._pause_gate,
                     run_options=run_options,
                 )
                 runtime.start()
@@ -215,6 +299,8 @@ class PrintController:
 
             for task in tasks:
                 if self._stop_event.is_set():
+                    break
+                if not self._pause_gate.wait_if_paused(self._stop_event):
                     break
                 self._task_started_at.setdefault(task.task_id, time.time())
                 self.signals.task_status.emit(TaskStatusMessage(task.task_id, "Scheduling"))
@@ -229,10 +315,14 @@ class PrintController:
                 summary = ", ".join(f"{batch.worker_name}×{batch.copies}" for batch in batches)
                 self.signals.task_status.emit(TaskStatusMessage(task.task_id, "Queued", assigned_summary=summary))
                 for batch in batches:
+                    if not self._pause_gate.wait_if_paused(self._stop_event):
+                        break
                     queues[batch.worker_name].put(batch)
                     self.signals.log.emit(
                         LogMessage("info", f"调度 {task.file_name()} -> {batch.worker_name} ×{batch.copies}")
                     )
+                if self._stop_event.is_set():
+                    break
 
             for q in queues.values():
                 q.join()
@@ -242,6 +332,7 @@ class PrintController:
                 q.put(None)
             for runtime in runtimes:
                 runtime.join(timeout=2)
+            self._set_paused(False)
             self._emit_summary(tasks)
             self.signals.run_state.emit(False)
 

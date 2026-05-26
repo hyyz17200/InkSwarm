@@ -112,6 +112,7 @@ class MainWindow(QMainWindow):
         self.controller.signals.task_status.connect(self.on_task_status)
         self.controller.signals.worker_status.connect(self.on_worker_status)
         self.controller.signals.run_state.connect(self.on_run_state_changed)
+        self.controller.signals.pause_state.connect(self.on_pause_state_changed)
         self.controller.signals.spool_progress.connect(self.on_spool_progress)
         self.log_writer = LocalLogWriter(self.store.paths.logs_dir)
         self.debug_log_path = (self.store.paths.logs_dir / DEBUG_LOG_NAME).resolve()
@@ -289,7 +290,7 @@ class MainWindow(QMainWindow):
         controls_layout.setSpacing(10)
 
         self.start_button = QPushButton("开始发送")
-        self.start_button.clicked.connect(self.start_run)
+        self.start_button.clicked.connect(self.start_or_toggle_pause)
         self.start_button.setObjectName("primaryActionButton")
         self.start_button.setMinimumHeight(96)
         self.start_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -851,10 +852,13 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "导出失败", str(exc))
 
-    def start_run(self) -> None:
+    def start_or_toggle_pause(self) -> None:
         if self.controller.is_running():
-            QMessageBox.warning(self, "运行中", "当前已有流程在运行。")
+            self.controller.toggle_pause()
             return
+        self.start_run()
+
+    def start_run(self) -> None:
         if not self.tasks:
             QMessageBox.information(self, "提示", "请先添加任务。")
             return
@@ -922,11 +926,19 @@ class MainWindow(QMainWindow):
         item.setText(status.status)
 
     def on_run_state_changed(self, running: bool) -> None:
-        self.start_button.setEnabled(not running)
+        self.start_button.setEnabled(True)
         self.stop_button.setEnabled(running)
         if running:
+            self.start_button.setText("暂停")
             self.spool_progress_bar.setValue(0)
+        else:
+            self.start_button.setText("开始发送")
         self.on_log_text("流程已启动。" if running else "流程已结束。")
+
+    def on_pause_state_changed(self, paused: bool) -> None:
+        if not self.controller.is_running():
+            return
+        self.start_button.setText("恢复" if paused else "暂停")
 
     def update_task_preview(self) -> None:
         row = self.task_table.currentRow()
