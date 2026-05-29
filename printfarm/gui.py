@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 from .config_store import ConfigStore
 from .controller import PrintController
 from .cache_service import CacheService
-from .local_logger import LocalLogWriter
+from .local_logger import LocalLogWriter, RegularLogFilter
 from .models import SUPPORTED_INPUT_SUFFIXES, TaskItem, TaskStatusMessage, WorkerConfig, WorkerStatusMessage
 from .run_service import RunService
 from .spooler_service import SpoolerMaintenance, SpoolerMaintenanceCancelled, run_elevated_spooler_maintenance
@@ -50,7 +50,7 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.1.10"
+APP_VERSION = "0.1.11"
 DEBUG_LOG_NAME = "debug.log"
 
 
@@ -121,6 +121,7 @@ class MainWindow(QMainWindow):
         self.spooler_maintenance_log.connect(self.on_log_text)
         self.spooler_maintenance_finished.connect(self.on_spooler_maintenance_finished)
         self.log_writer = LocalLogWriter(self.store.paths.logs_dir)
+        self.regular_log_filter = RegularLogFilter()
         self.debug_log_path = (self.store.paths.logs_dir / DEBUG_LOG_NAME).resolve()
         debug_log(f"mainwindow init root_dir={self.root_dir}")
         self.app_settings = self.store.load_app_settings()
@@ -1044,9 +1045,11 @@ class MainWindow(QMainWindow):
         self.on_log_text(message.format())
 
     def on_log_text(self, text: str) -> None:
+        debug_log(f"app-log {text}")
+        if not self.regular_log_filter.should_write(text):
+            return
         self.log_edit.appendPlainText(text)
         self.log_writer.append_line(text)
-        debug_log(f"app-log {text}")
 
     def on_spool_progress(self, sent: int, total: int) -> None:
         self._spool_total = max(0, int(total))
