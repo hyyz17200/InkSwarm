@@ -50,7 +50,7 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.1.9"
+APP_VERSION = "0.1.10"
 DEBUG_LOG_NAME = "debug.log"
 
 
@@ -228,9 +228,10 @@ class MainWindow(QMainWindow):
         btn_copies.clicked.connect(self.set_selected_task_copies)
         self.task_copies_value_box = QSpinBox()
         self.task_copies_value_box.setRange(1, 9999)
-        self.task_copies_value_box.setValue(1)
+        self.task_copies_value_box.setValue(self._task_default_copies())
         self.task_copies_value_box.setAlignment(Qt.AlignCenter)
         self.task_copies_value_box.setFixedWidth(88)
+        self.task_copies_value_box.valueChanged.connect(self.on_task_default_copies_changed)
         for btn in [btn_add, btn_remove, btn_clear, btn_copies]:
             task_buttons.addWidget(btn)
         task_buttons.addWidget(self.task_copies_value_box)
@@ -743,6 +744,16 @@ class MainWindow(QMainWindow):
         if task is not None:
             self.refresh_task_row(task)
 
+    def _task_default_copies(self) -> int:
+        try:
+            value = int(self.app_settings.get("task_default_copies", 1) or 1)
+        except (TypeError, ValueError):
+            value = 1
+        return max(1, min(9999, value))
+
+    def on_task_default_copies_changed(self, value: int) -> None:
+        self.app_settings["task_default_copies"] = int(value)
+
     def on_task_copies_changed(self, task_id: str, value: int) -> None:
         self.task_service.set_task_copies(self.tasks, task_id, value)
 
@@ -1153,6 +1164,7 @@ class MainWindow(QMainWindow):
             return
         self.save_worker_settings()
         self.app_settings["active_worker_group"] = self.current_worker_group
+        self.app_settings["task_default_copies"] = int(self.task_copies_value_box.value())
         self.store.save_app_settings(self.app_settings)
         if self.app_settings.get("save_tasks_on_exit", False):
             self.task_service.save_session(self.tasks)

@@ -162,6 +162,7 @@ class ConfigStore:
             "rip_limit_enabled": True,
             "rip_limit_ppi": 300,
             "font_engine": "auto",
+            "task_default_copies": 1,
         }
         if not self.paths.settings_file.exists():
             return defaults
