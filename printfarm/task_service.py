@@ -31,9 +31,10 @@ class TaskService:
     def __init__(self, store: ConfigStore) -> None:
         self.store = store
 
-    def add_files(self, tasks: list[TaskItem], files: Iterable[Path]) -> AddTasksResult:
+    def add_files(self, tasks: list[TaskItem], files: Iterable[Path], default_copies: int = 1) -> AddTasksResult:
         result = AddTasksResult()
         existing_paths = {task.file_path.resolve() for task in tasks}
+        copies = max(1, int(default_copies))
         for path in files:
             if not path.exists() or path.suffix.lower() not in SUPPORTED_INPUT_SUFFIXES:
                 continue
@@ -46,7 +47,7 @@ class TaskService:
                 result.skipped.append(SkippedTaskInput(resolved, str(exc)))
                 continue
 
-            task = TaskItem(file_path=resolved, display_size_mm=inspection.display_size_mm)
+            task = TaskItem(file_path=resolved, copies=copies, display_size_mm=inspection.display_size_mm)
             preview_path = build_preview_file(self.store.paths.preview_dir, task.task_id, inspection.preview_bytes)
             task.preview_path = str(preview_path)
             tasks.append(task)

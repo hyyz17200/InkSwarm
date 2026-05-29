@@ -21,7 +21,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QHeaderView,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -51,7 +50,7 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.1.7"
+APP_VERSION = "0.1.8"
 DEBUG_LOG_NAME = "debug.log"
 
 
@@ -227,8 +226,14 @@ class MainWindow(QMainWindow):
         btn_clear.clicked.connect(self.clear_tasks)
         btn_copies = QPushButton("批量设置份数")
         btn_copies.clicked.connect(self.set_selected_task_copies)
+        self.task_copies_value_box = QSpinBox()
+        self.task_copies_value_box.setRange(1, 9999)
+        self.task_copies_value_box.setValue(1)
+        self.task_copies_value_box.setAlignment(Qt.AlignCenter)
+        self.task_copies_value_box.setFixedWidth(88)
         for btn in [btn_add, btn_remove, btn_clear, btn_copies]:
             task_buttons.addWidget(btn)
+        task_buttons.addWidget(self.task_copies_value_box)
         task_buttons.addStretch(1)
         top_layout.addLayout(task_buttons)
 
@@ -603,6 +608,7 @@ class MainWindow(QMainWindow):
         self.worker_table.setColumnWidth(2, max(130, round(150 * scale / 100)))
         self.worker_table.setColumnWidth(3, max(180, round(225 * scale / 100)))
         self.worker_table.setColumnWidth(4, max(76, round(82 * scale / 100)))
+        self.task_copies_value_box.setFixedWidth(max(82, round(88 * scale / 100)))
         self.task_table.setColumnWidth(0, max(54, round(56 * scale / 100)))
         self.task_table.setColumnWidth(2, max(82, round(88 * scale / 100)))
         status_width = max(145, round(160 * scale / 100))
@@ -685,7 +691,7 @@ class MainWindow(QMainWindow):
         self.add_files([Path(f) for f in files])
 
     def add_files(self, files: list[Path]) -> None:
-        result = self.task_service.add_files(self.tasks, files)
+        result = self.task_service.add_files(self.tasks, files, default_copies=self.task_copies_value_box.value())
         self.refresh_task_table()
         for skipped in result.skipped:
             self.on_log_text(f"跳过 {skipped.file_path.name}: {skipped.reason}")
@@ -756,9 +762,7 @@ class MainWindow(QMainWindow):
         rows = sorted({index.row() for index in self.task_table.selectedIndexes()})
         if not rows:
             return
-        value, ok = QInputDialog.getInt(self, "份数", "输入份数", value=1, minValue=1, maxValue=9999)
-        if not ok:
-            return
+        value = self.task_copies_value_box.value()
         self.task_service.set_rows_copies(self.tasks, rows, value)
         self.refresh_task_table()
 
