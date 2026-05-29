@@ -15,7 +15,7 @@ from .printui import restore_printer_settings
 from .renderer import Renderer
 from .scheduler import WeightedScheduler
 from .spooler import PrinterSpooler
-from .statistics_writer import MonthlyStatisticsWriter
+from .statistics_writer import MonthlyStatisticsWriter, StatisticsTaskRecord
 
 
 class ControllerSignals(QObject):
@@ -221,9 +221,10 @@ class PrintController:
         self._task_progress: dict[str, int] = defaultdict(int)
         self._task_started_at: dict[str, float] = {}
         self._task_file_names: dict[str, str] = {}
-        self._task_stats_recorded: set[str] = set()
+        self._statistics_run_id: str | None = None
         self._spool_target = 0
         self._spool_progress = 0
+        self._flush_pending_statistics("startup", emit_log=False)
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -235,15 +236,33 @@ class PrintController:
         if self.is_running():
             raise RuntimeError("当前已有流程正在运行")
         options = run_options or RunOptions()
+        self._flush_pending_statistics("start")
         self._stop_event.clear()
         self._set_paused(False, emit=False)
+        run_started_at = time.time()
+        self._statistics_run_id = self._statistics_writer.new_run_id()
         self._task_targets = {task.task_id: task.copies for task in tasks}
         self._task_progress = defaultdict(int)
         self._task_started_at = {}
         self._task_file_names = {task.task_id: task.file_name() for task in tasks}
-        self._task_stats_recorded = set()
         self._spool_target = sum(max(0, int(task.copies)) for task in tasks)
         self._spool_progress = 0
+        try:
+            self._statistics_writer.begin_run(
+                self._statistics_run_id,
+                run_started_at,
+                [
+                    StatisticsTaskRecord(
+                        task_id=task.task_id,
+                        file_name=task.file_name(),
+                        requested_copies=task.copies,
+                    )
+                    for task in tasks
+                ],
+            )
+        except Exception as exc:
+            debug_exception("PrintController.start.statistics_begin", exc)
+            self.signals.log.emit(LogMessage("warning", f"统计快照初始化失败，本次流程可能无法自动恢复统计: {exc}"))
         with self._spool_activity:
             self._active_spool_sends = 0
         self.signals.spool_progress.emit(0, self._spool_target)
@@ -327,7 +346,9 @@ class PrintController:
                     break
                 if not self._pause_gate.wait_if_paused(self._stop_event):
                     break
-                self._task_started_at.setdefault(task.task_id, time.time())
+                started_at = time.time()
+                self._task_started_at.setdefault(task.task_id, started_at)
+                self._mark_statistics_task_started(task, started_at)
                 self.signals.task_status.emit(TaskStatusMessage(task.task_id, "Scheduling"))
                 try:
                     batches = scheduler.allocate(task, workers)
@@ -359,6 +380,7 @@ class PrintController:
                 runtime.join(timeout=2)
             self._set_paused(False)
             self._emit_summary(tasks)
+            self._finish_statistics_run()
             self.signals.run_state.emit(False)
 
     def _begin_spool_send(self) -> None:
@@ -391,27 +413,80 @@ class PrintController:
             time.sleep(0.05)
 
     def _record_progress(self, task_id: str, copies_done: int) -> None:
+        total = self._task_targets.get(task_id, 0)
+        file_name = self._task_file_names.get(task_id, task_id)
+        run_id = self._statistics_run_id
+        if run_id is not None:
+            try:
+                self._statistics_writer.record_success(
+                    run_id=run_id,
+                    task_id=task_id,
+                    file_name=file_name,
+                    requested_copies=total,
+                    copies_done=copies_done,
+                )
+            except Exception as exc:
+                debug_exception(f"PrintController._record_progress.statistics[{file_name}]", exc)
+                self.signals.log.emit(LogMessage("warning", f"统计快照写入失败: {file_name}: {exc}"))
         with self._lock:
             self._task_progress[task_id] += copies_done
             done = self._task_progress[task_id]
-            total = self._task_targets.get(task_id, 0)
             self._spool_progress += copies_done
             spool_done = self._spool_progress
             spool_total = self._spool_target
         self.signals.spool_progress.emit(spool_done, spool_total)
         status = "Done" if done >= total else f"Printing {done}/{total}"
         self.signals.task_status.emit(TaskStatusMessage(task_id=task_id, status=status, completed_copies=done))
-        if done >= total and task_id not in self._task_stats_recorded:
-            started_at = self._task_started_at.get(task_id, time.time())
-            file_name = self._task_file_names.get(task_id, task_id)
-            try:
-                self._statistics_writer.append_success(started_at, file_name, total)
-            except Exception as exc:
-                debug_exception(f"PrintController._record_progress.statistics[{file_name}]", exc)
-                self.signals.log.emit(LogMessage("warning", f"统计写入失败: {file_name}: {exc}"))
-            else:
-                self._task_stats_recorded.add(task_id)
-                debug_log(f"statistics append file={file_name} quantity={total} started_at={started_at}")
+
+    def _mark_statistics_task_started(self, task: TaskItem, started_at: float) -> None:
+        run_id = self._statistics_run_id
+        if run_id is None:
+            return
+        try:
+            self._statistics_writer.mark_task_started(
+                run_id=run_id,
+                task_id=task.task_id,
+                file_name=task.file_name(),
+                requested_copies=task.copies,
+                started_at_ts=started_at,
+            )
+        except Exception as exc:
+            debug_exception(f"PrintController._mark_statistics_task_started[{task.file_name()}]", exc)
+            self.signals.log.emit(LogMessage("warning", f"统计任务启动时间写入失败: {task.file_name()}: {exc}"))
+
+    def _finish_statistics_run(self) -> None:
+        run_id = self._statistics_run_id
+        self._statistics_run_id = None
+        if run_id is None:
+            return
+        try:
+            result = self._statistics_writer.finish_run(run_id)
+        except Exception as exc:
+            debug_exception("PrintController._finish_statistics_run", exc)
+            self.signals.log.emit(LogMessage("warning", f"统计同步失败，pending 快照会保留以便下次重试: {exc}"))
+            return
+        if not result.ok:
+            detail = "; ".join(result.errors) or f"{result.pending_runs} 个 pending 运行尚未同步"
+            debug_log(f"statistics flush pending context=finish detail={detail}")
+            self.signals.log.emit(LogMessage("warning", f"统计 CSV 暂时无法写入，已保留快照稍后重试: {detail}"))
+        elif result.flushed_runs:
+            debug_log(f"statistics flush complete context=finish flushed_runs={result.flushed_runs}")
+
+    def _flush_pending_statistics(self, context: str, emit_log: bool = True) -> None:
+        try:
+            result = self._statistics_writer.flush_pending_runs()
+        except Exception as exc:
+            debug_exception(f"PrintController._flush_pending_statistics[{context}]", exc)
+            if emit_log:
+                self.signals.log.emit(LogMessage("warning", f"历史统计同步失败，pending 快照会保留以便下次重试: {exc}"))
+            return
+        if not result.ok:
+            detail = "; ".join(result.errors) or f"{result.pending_runs} 个 pending 运行尚未同步"
+            debug_log(f"statistics flush pending context={context} detail={detail}")
+            if emit_log:
+                self.signals.log.emit(LogMessage("warning", f"历史统计 CSV 暂时无法写入，已保留快照稍后重试: {detail}"))
+        elif result.flushed_runs:
+            debug_log(f"statistics flush complete context={context} flushed_runs={result.flushed_runs}")
 
     def _emit_summary(self, tasks: list[TaskItem]) -> None:
         success_tasks = 0

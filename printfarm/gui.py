@@ -50,7 +50,7 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.1.8"
+APP_VERSION = "0.1.9"
 DEBUG_LOG_NAME = "debug.log"
 
 
