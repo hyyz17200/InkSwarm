@@ -17,7 +17,8 @@ class PreparedRun:
 
 class RunService:
     def prepare_start(self, tasks: list[TaskItem], workers: list[WorkerConfig], settings: dict[str, Any]) -> PreparedRun:
-        copied_tasks = copy.deepcopy(tasks)
+        active_tasks = [task for task in tasks if task.enabled]
+        copied_tasks = copy.deepcopy(active_tasks)
         copied_workers = copy.deepcopy(workers)
         return PreparedRun(
             tasks=copied_tasks,

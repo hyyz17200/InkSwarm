@@ -51,7 +51,7 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.1.6"
+APP_VERSION = "0.1.7"
 DEBUG_LOG_NAME = "debug.log"
 
 
@@ -179,20 +179,22 @@ class MainWindow(QMainWindow):
         self.top_splitter = QSplitter(Qt.Horizontal)
 
         self.task_table = FileDropTable(self.add_files)
-        self.task_table.setColumnCount(5)
-        self.task_table.setHorizontalHeaderLabels(["文件", "份数", "打印尺寸", "状态", "分配"])
+        self.task_table.setColumnCount(6)
+        self.task_table.setHorizontalHeaderLabels(["启用", "文件", "份数", "打印尺寸", "状态", "分配"])
         self.task_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.task_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.task_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.task_table.setAlternatingRowColors(True)
-        self.task_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.task_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
+        self.task_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.task_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.task_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
         self.task_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
-        self.task_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
-        self.task_table.setColumnWidth(1, 88)
-        self.task_table.setColumnWidth(2, 160)
+        self.task_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Fixed)
+        self.task_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.task_table.setColumnWidth(0, 56)
+        self.task_table.setColumnWidth(2, 88)
         self.task_table.setColumnWidth(3, 160)
+        self.task_table.setColumnWidth(4, 160)
         self.task_table.itemSelectionChanged.connect(self.update_task_preview)
         self.top_splitter.addWidget(self.task_table)
 
@@ -601,10 +603,11 @@ class MainWindow(QMainWindow):
         self.worker_table.setColumnWidth(2, max(130, round(150 * scale / 100)))
         self.worker_table.setColumnWidth(3, max(180, round(225 * scale / 100)))
         self.worker_table.setColumnWidth(4, max(76, round(82 * scale / 100)))
-        self.task_table.setColumnWidth(1, max(82, round(88 * scale / 100)))
+        self.task_table.setColumnWidth(0, max(54, round(56 * scale / 100)))
+        self.task_table.setColumnWidth(2, max(82, round(88 * scale / 100)))
         status_width = max(145, round(160 * scale / 100))
-        self.task_table.setColumnWidth(2, status_width)
         self.task_table.setColumnWidth(3, status_width)
+        self.task_table.setColumnWidth(4, status_width)
         self.top_splitter.setSizes([max(860, round(1120 * scale / 100)), max(220, round(260 * scale / 100))])
         self.bottom_splitter.setSizes([max(390, round(470 * scale / 100)), max(180, round(210 * scale / 100))])
         self.main_splitter.setSizes([max(280, round(320 * scale / 100)), max(520, round(620 * scale / 100))])
@@ -695,33 +698,44 @@ class MainWindow(QMainWindow):
         for row, task in enumerate(self.tasks):
             self.task_row_by_id[task.task_id] = row
 
+            enabled_box = QCheckBox()
+            enabled_box.setChecked(task.enabled)
+            enabled_box.setEnabled(not self.controller.is_running())
+            enabled_box.toggled.connect(lambda checked, task_id=task.task_id: self.on_task_enabled_changed(task_id, checked))
+            self.task_table.setCellWidget(row, 0, self._centered_widget(enabled_box))
+
             file_item = QTableWidgetItem(task.file_name())
             file_item.setData(Qt.UserRole, task.task_id)
             file_item.setFlags(file_item.flags() & ~Qt.ItemIsEditable)
-            self.task_table.setItem(row, 0, file_item)
+            self.task_table.setItem(row, 1, file_item)
 
             copies_box = QSpinBox()
             copies_box.setRange(1, 9999)
             copies_box.setAlignment(Qt.AlignCenter)
             copies_box.setValue(task.copies)
             copies_box.valueChanged.connect(lambda value, task_id=task.task_id: self.on_task_copies_changed(task_id, value))
-            self.task_table.setCellWidget(row, 1, copies_box)
+            self.task_table.setCellWidget(row, 2, copies_box)
 
             size_item = QTableWidgetItem(task.display_size_mm)
             size_item.setTextAlignment(Qt.AlignCenter)
             size_item.setFlags(size_item.flags() & ~Qt.ItemIsEditable)
-            self.task_table.setItem(row, 2, size_item)
+            self.task_table.setItem(row, 3, size_item)
 
             status_item = QTableWidgetItem(task.status)
             status_item.setTextAlignment(Qt.AlignCenter)
             status_item.setFlags(status_item.flags() & ~Qt.ItemIsEditable)
-            self.task_table.setItem(row, 3, status_item)
+            self.task_table.setItem(row, 4, status_item)
 
             assigned_item = QTableWidgetItem(task.assigned_summary)
             assigned_item.setFlags(assigned_item.flags() & ~Qt.ItemIsEditable)
-            self.task_table.setItem(row, 4, assigned_item)
+            self.task_table.setItem(row, 5, assigned_item)
 
         self.update_task_preview()
+
+    def on_task_enabled_changed(self, task_id: str, enabled: bool) -> None:
+        task = self.task_service.set_task_enabled(self.tasks, task_id, enabled)
+        if task is not None:
+            self.refresh_task_row(task)
 
     def on_task_copies_changed(self, task_id: str, value: int) -> None:
         self.task_service.set_task_copies(self.tasks, task_id, value)
@@ -877,10 +891,13 @@ class MainWindow(QMainWindow):
         if not self.tasks:
             QMessageBox.information(self, "提示", "请先添加任务。")
             return
+        if not any(task.enabled for task in self.tasks):
+            QMessageBox.information(self, "提示", "请至少勾选一个要发送的任务。")
+            return
         self.save_worker_settings()
-        prepared = self.run_service.prepare_start(self.tasks, self.workers, self.app_settings)
         self.task_service.reset_for_run(self.tasks)
         self.refresh_task_table()
+        prepared = self.run_service.prepare_start(self.tasks, self.workers, self.app_settings)
         self._spool_total = prepared.spool_total
         self.spool_progress_bar.setRange(0, max(1, self._spool_total))
         self.spool_progress_bar.setValue(0)
@@ -1035,10 +1052,10 @@ class MainWindow(QMainWindow):
         if row is None:
             self.refresh_task_table()
             return
-        status_item = self.task_table.item(row, 3)
+        status_item = self.task_table.item(row, 4)
         if status_item is not None:
             status_item.setText(task.status)
-        assigned_item = self.task_table.item(row, 4)
+        assigned_item = self.task_table.item(row, 5)
         if assigned_item is not None:
             assigned_item.setText(task.assigned_summary)
 
@@ -1060,6 +1077,7 @@ class MainWindow(QMainWindow):
             self.spool_progress_bar.setValue(0)
         else:
             self.start_button.setText("开始发送")
+        self.refresh_task_table()
         self.on_log_text("流程已启动。" if running else "流程已结束。")
 
     def on_pause_state_changed(self, paused: bool) -> None:

@@ -61,18 +61,25 @@ class TaskService:
 
         files_to_add: list[Path] = []
         copies_map: dict[Path, int] = {}
+        enabled_map: dict[Path, bool] = {}
         for item in session_items:
             raw_path = item.get("file_path")
             if not raw_path:
                 continue
             path = Path(raw_path)
             if path.exists() and path.suffix.lower() in SUPPORTED_INPUT_SUFFIXES:
+                resolved = path.resolve()
                 files_to_add.append(path)
-                copies_map[path.resolve()] = max(1, int(item.get("copies", 1)))
+                copies_map[resolved] = max(1, int(item.get("copies", 1)))
+                enabled_map[resolved] = bool(item.get("enabled", True))
 
         add_result = self.add_files(tasks, files_to_add)
         for task in tasks:
-            task.copies = copies_map.get(task.file_path.resolve(), task.copies)
+            resolved = task.file_path.resolve()
+            task.copies = copies_map.get(resolved, task.copies)
+            task.enabled = enabled_map.get(resolved, task.enabled)
+            if not task.enabled:
+                task.status = "Disabled"
         return RestoreTasksResult(requested_count=len(files_to_add), add_result=add_result)
 
     def save_session(self, tasks: list[TaskItem]) -> None:
@@ -86,6 +93,22 @@ class TaskService:
         task = next((item for item in tasks if item.task_id == task_id), None)
         if task is not None:
             task.copies = int(value)
+
+    @staticmethod
+    def set_task_enabled(tasks: list[TaskItem], task_id: str, enabled: bool) -> TaskItem | None:
+        task = next((item for item in tasks if item.task_id == task_id), None)
+        if task is None:
+            return None
+        task.enabled = bool(enabled)
+        if task.enabled:
+            if task.status == "Disabled":
+                task.status = "Pending"
+        else:
+            task.status = "Disabled"
+            task.assigned_summary = ""
+            task.completed_copies = 0
+            task.error_message = ""
+        return task
 
     @staticmethod
     def remove_rows(tasks: list[TaskItem], rows: Iterable[int]) -> None:
@@ -106,7 +129,7 @@ class TaskService:
     @staticmethod
     def reset_for_run(tasks: list[TaskItem]) -> None:
         for task in tasks:
-            task.status = "Waiting"
+            task.status = "Waiting" if task.enabled else "Disabled"
             task.completed_copies = 0
             task.assigned_summary = ""
             task.error_message = ""

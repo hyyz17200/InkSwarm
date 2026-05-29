@@ -180,6 +180,7 @@ class ConfigStore:
         for task in tasks:
             payload.append({
                 "file_path": str(task.file_path),
+                "enabled": bool(task.enabled),
                 "copies": int(task.copies),
             })
         self.task_session_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")

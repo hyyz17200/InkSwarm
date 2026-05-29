@@ -26,6 +26,7 @@ DEFAULT_RASTER_DPI = 300
 class TaskItem:
     file_path: Path
     copies: int = 1
+    enabled: bool = True
     display_size_mm: str = "读取中"
     task_id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     status: str = "Pending"
@@ -39,6 +40,7 @@ class TaskItem:
 
     def to_row(self) -> list[str]:
         return [
+            "启用" if self.enabled else "停用",
             self.file_name(),
             str(self.copies),
             self.display_size_mm,
@@ -50,6 +52,7 @@ class TaskItem:
         return {
             "task_id": self.task_id,
             "file_path": str(self.file_path),
+            "enabled": self.enabled,
             "copies": self.copies,
             "display_size_mm": self.display_size_mm,
             "status": self.status,
