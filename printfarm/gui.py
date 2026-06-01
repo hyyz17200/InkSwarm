@@ -50,7 +50,7 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 DEBUG_LOG_NAME = "debug.log"
 
 
@@ -385,7 +385,7 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("设置")
         dialog.setModal(True)
-        dialog.resize(520, 460)
+        dialog.resize(520, 500)
 
         layout = QVBoxLayout(dialog)
         form = QFormLayout()
@@ -451,6 +451,18 @@ class MainWindow(QMainWindow):
         queue_limit_enabled_checkbox.toggled.connect(queue_limit_spin.setEnabled)
         form.addRow("最大排队值", queue_limit_spin)
 
+        tail_balance_enabled_checkbox = QCheckBox("启用")
+        tail_balance_enabled_checkbox.setChecked(bool(self.app_settings.get("tail_balance_enabled", False)))
+        form.addRow("尾段动态均衡", tail_balance_enabled_checkbox)
+
+        tail_balance_idle_spin = QSpinBox()
+        tail_balance_idle_spin.setRange(1, 600)
+        tail_balance_idle_spin.setSuffix(" 秒")
+        tail_balance_idle_spin.setValue(int(self.app_settings.get("tail_balance_idle_seconds", 15) or 15))
+        tail_balance_idle_spin.setEnabled(tail_balance_enabled_checkbox.isChecked())
+        tail_balance_enabled_checkbox.toggled.connect(tail_balance_idle_spin.setEnabled)
+        form.addRow("空闲判定时间（秒）", tail_balance_idle_spin)
+
         rip_limit_enabled_checkbox = QCheckBox("启用")
         rip_limit_enabled_checkbox.setChecked(bool(self.app_settings.get("rip_limit_enabled", True)))
         form.addRow("RIP 精度限制", rip_limit_enabled_checkbox)
@@ -488,6 +500,8 @@ class MainWindow(QMainWindow):
         self.app_settings["target_orientation"] = str(orientation_combo.currentData())
         self.app_settings["worker_queue_limit_enabled"] = bool(queue_limit_enabled_checkbox.isChecked())
         self.app_settings["worker_queue_limit"] = int(queue_limit_spin.value())
+        self.app_settings["tail_balance_enabled"] = bool(tail_balance_enabled_checkbox.isChecked())
+        self.app_settings["tail_balance_idle_seconds"] = int(tail_balance_idle_spin.value())
         self.app_settings["rip_limit_enabled"] = bool(rip_limit_enabled_checkbox.isChecked())
         self.app_settings["rip_limit_ppi"] = int(rip_limit_spin.value())
         self.store.save_app_settings(self.app_settings)
@@ -501,7 +515,7 @@ class MainWindow(QMainWindow):
             f"关于 {APP_NAME}",
             f"{APP_NAME} {APP_VERSION}\n\n"
             "软件逻辑：\n"
-            "将文件列表中的每个条目视为一个任务，先按 Worker 的速度比例分配总张数，再按轮询顺序投递到各台打印机。相同 Worker 对同一任务只会进行一次渲染与色彩转换，并复用缓存结果连续发送。可选的纸张方向自适应会在发送前统一旋转到 Portrait 或 Landscape。\n\n"
+            "将文件列表中的每个条目视为一个任务，先按 Worker 的速度比例分配总张数，再按轮询顺序投递到各台打印机。相同 Worker 对同一任务只会进行一次渲染与色彩转换，并复用缓存结果连续发送。可选的尾段动态均衡会在静态分配队列接近结束时，让空闲 Worker 接手其他 Worker 尚未发送的剩余份数。可选的纸张方向自适应会在发送前统一旋转到 Portrait 或 Landscape。\n\n"
             "基本流程：\n"
             "1. 准备 Workers 目录组、打印机与 preset。\n"
             "2. 根据需要为 preset 绑定 ICC 与驱动快照。\n"

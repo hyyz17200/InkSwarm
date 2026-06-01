@@ -193,6 +193,8 @@ class RunOptions:
     worker_queue_limit_enabled: bool = False
     worker_queue_limit: int = 0
     queue_poll_seconds: float = 5.0
+    tail_balance_enabled: bool = False
+    tail_balance_idle_seconds: int = 15
     rip_limit_enabled: bool = True
     rip_limit_ppi: int = DEFAULT_RASTER_DPI
 

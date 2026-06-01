@@ -16,6 +16,7 @@ from .renderer import Renderer
 from .scheduler import WeightedScheduler
 from .spooler import PrinterSpooler
 from .statistics_writer import MonthlyStatisticsWriter, StatisticsTaskRecord
+from .tail_balance import TailBalanceAssignment, TailBalanceCoordinator
 
 
 class ControllerSignals(QObject):
@@ -61,7 +62,7 @@ class WorkerRuntime(threading.Thread):
     def __init__(
         self,
         worker: WorkerConfig,
-        job_queue: queue.Queue[WorkerTaskBatch | None],
+        job_queue: queue.Queue[WorkerTaskBatch | None] | None,
         signals: ControllerSignals,
         renderer: Renderer,
         printer_access: PrinterAccessCoordinator,
@@ -71,6 +72,7 @@ class WorkerRuntime(threading.Thread):
         stop_event: threading.Event,
         pause_gate: _PauseGate,
         run_options: RunOptions,
+        tail_coordinator: TailBalanceCoordinator | None = None,
     ) -> None:
         super().__init__(daemon=True, name=f"WorkerRuntime-{worker.name}")
         self.worker = worker
@@ -84,17 +86,18 @@ class WorkerRuntime(threading.Thread):
         self.stop_event = stop_event
         self.pause_gate = pause_gate
         self.run_options = run_options
+        self.tail_coordinator = tail_coordinator
         self.spooler: PrinterSpooler | None = None
 
     def run(self) -> None:
         self.spooler = PrinterSpooler()
         self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, "Idle"))
         while True:
-            batch = self.job_queue.get()
-            if batch is None:
-                self.job_queue.task_done()
+            assignment = self._next_assignment()
+            if assignment is None:
                 self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, "Stopped"))
                 break
+            batch = assignment.batch
             try:
                 if self.stop_event.is_set():
                     self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, "Stopping"))
@@ -102,7 +105,14 @@ class WorkerRuntime(threading.Thread):
                 if not self._wait_for_resume("Paused"):
                     self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, "Stopping"))
                     continue
-                self._process_batch(batch)
+                if assignment.stolen_from:
+                    self.signals.log.emit(
+                        LogMessage(
+                            "info",
+                            f"尾段均衡: {self.worker.name} 从 {assignment.stolen_from} 接手 {batch.task.file_name()} ×{batch.copies}",
+                        )
+                    )
+                self._process_batch(batch, assignment.active_id)
             except Exception as exc:
                 debug_exception(f"WorkerRuntime.run[{self.worker.name}]", exc)
                 self.signals.log.emit(LogMessage("error", f"{self.worker.name}: {exc}"))
@@ -115,9 +125,26 @@ class WorkerRuntime(threading.Thread):
                 )
                 self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, "Error"))
             finally:
-                self.job_queue.task_done()
+                self._complete_assignment(assignment)
 
-    def _process_batch(self, batch: WorkerTaskBatch) -> None:
+    def _next_assignment(self) -> TailBalanceAssignment | None:
+        if self.tail_coordinator is not None:
+            return self.tail_coordinator.get_next(self.worker.name, self.stop_event)
+        assert self.job_queue is not None
+        batch = self.job_queue.get()
+        if batch is None:
+            self.job_queue.task_done()
+            return None
+        return TailBalanceAssignment(batch=batch, active_id=None)
+
+    def _complete_assignment(self, assignment: TailBalanceAssignment) -> None:
+        if self.tail_coordinator is not None and assignment.active_id is not None:
+            self.tail_coordinator.complete_assignment(self.worker.name, assignment.active_id)
+            return
+        assert self.job_queue is not None
+        self.job_queue.task_done()
+
+    def _process_batch(self, batch: WorkerTaskBatch, active_id: int | None = None) -> None:
         preset = self.worker.get_active_preset()
         self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, f"Preparing {batch.task.file_name()} ×{batch.copies}"))
         artifact = self.renderer.ensure_render_cache(batch.task, self.worker)
@@ -132,7 +159,7 @@ class WorkerRuntime(threading.Thread):
         assert self.spooler is not None
         restore_file = self.worker.resolve_path(preset.printui_restore_file) if preset.printui_restore_file else None
 
-        def before_each_copy(current_copy: int, total_copies: int) -> None:
+        def before_each_copy(current_copy: int, total_copies: int) -> bool | None:
             if self.stop_event.is_set():
                 raise RuntimeError("已停止")
             if not self._wait_for_resume(f"Paused {batch.task.file_name()}"):
@@ -150,9 +177,13 @@ class WorkerRuntime(threading.Thread):
                 )
             if not self._wait_for_resume(f"Paused {batch.task.file_name()}"):
                 raise RuntimeError("已停止")
+            if self.tail_coordinator is not None and active_id is not None:
+                if not self.tail_coordinator.claim_active_copy(self.worker.name, active_id):
+                    return False
             self.signals.worker_status.emit(
                 WorkerStatusMessage(self.worker.name, f"Printing {batch.task.file_name()} {current_copy}/{total_copies}")
             )
+            return None
 
         def after_each_copy(current_copy: int, total_copies: int) -> None:
             self.progress_callback(batch.task.task_id, 1)
@@ -318,13 +349,19 @@ class PrintController:
         queues: dict[str, queue.Queue[WorkerTaskBatch | None]] = {}
         runtimes: list[WorkerRuntime] = []
         printer_access = PrinterAccessCoordinator()
+        active_workers = [worker for worker in workers if worker.enabled and worker.printer_name.strip()]
+        tail_coordinator = (
+            TailBalanceCoordinator(active_workers, idle_seconds=run_options.tail_balance_idle_seconds, enabled=True)
+            if run_options.tail_balance_enabled
+            else None
+        )
 
         try:
-            for worker in workers:
-                if not worker.enabled or not worker.printer_name.strip():
-                    continue
-                q: queue.Queue[WorkerTaskBatch | None] = queue.Queue()
-                queues[worker.name] = q
+            for worker in active_workers:
+                q: queue.Queue[WorkerTaskBatch | None] | None = None
+                if tail_coordinator is None:
+                    q = queue.Queue()
+                    queues[worker.name] = q
                 runtime = WorkerRuntime(
                     worker=worker,
                     job_queue=q,
@@ -337,6 +374,7 @@ class PrintController:
                     stop_event=self._stop_event,
                     pause_gate=self._pause_gate,
                     run_options=run_options,
+                    tail_coordinator=tail_coordinator,
                 )
                 runtime.start()
                 runtimes.append(runtime)
@@ -363,19 +401,29 @@ class PrintController:
                 for batch in batches:
                     if not self._pause_gate.wait_if_paused(self._stop_event):
                         break
-                    queues[batch.worker_name].put(batch)
+                    if tail_coordinator is not None:
+                        tail_coordinator.add_batch(batch)
+                    else:
+                        queues[batch.worker_name].put(batch)
                     self.signals.log.emit(
                         LogMessage("info", f"调度 {task.file_name()} -> {batch.worker_name} ×{batch.copies}")
                     )
                 if self._stop_event.is_set():
                     break
 
-            for q in queues.values():
-                q.join()
+            if tail_coordinator is not None:
+                tail_coordinator.close_dispatch()
+                tail_coordinator.wait_until_done()
+            else:
+                for q in queues.values():
+                    q.join()
         finally:
             debug_log("controller run finalizing")
-            for q in queues.values():
-                q.put(None)
+            if tail_coordinator is not None:
+                tail_coordinator.close_dispatch()
+            else:
+                for q in queues.values():
+                    q.put(None)
             for runtime in runtimes:
                 runtime.join(timeout=2)
             self._set_paused(False)

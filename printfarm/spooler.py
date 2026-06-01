@@ -79,14 +79,15 @@ class PrinterSpooler:
         job_name: str,
         copies: int,
         ignore_margins: bool = True,
-        before_each_copy: Callable[[int, int], None] | None = None,
+        before_each_copy: Callable[[int, int], bool | None] | None = None,
         after_each_copy: Callable[[int, int], None] | None = None,
         before_send: Callable[[], None] | None = None,
         after_send: Callable[[], None] | None = None,
     ) -> None:
         for copy_index in range(copies):
             if before_each_copy is not None:
-                before_each_copy(copy_index + 1, copies)
+                if before_each_copy(copy_index + 1, copies) is False:
+                    break
             effective_name = f"{job_name} [copy {copy_index + 1}/{copies}]"
             debug_log(f"spooler print start printer={printer_name} job={effective_name} pages={len(page_paths)} ignore_margins={ignore_margins}")
             if before_send is not None:
