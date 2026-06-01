@@ -91,6 +91,26 @@ class TailBalanceCoordinatorTests(TestCase):
         self.assertEqual(assignment.batch.copies, 1)
         self.assertEqual(coordinator.remaining_for_worker("A"), 2)
 
+    def test_tail_ready_worker_keeps_stealing_without_rewaiting_idle_threshold(self) -> None:
+        item = task(copies=4)
+        workers = [worker("A"), worker("B")]
+        coordinator = TailBalanceCoordinator(workers, idle_seconds=15)
+        coordinator.add_batch(batch(item, workers[0], copies=4))
+        coordinator.close_dispatch()
+
+        first = coordinator.try_steal_now("B", idle_elapsed_seconds=15)
+        self.assertIsNotNone(first)
+        assert first is not None
+        assert first.active_id is not None
+        coordinator.complete_assignment("B", first.active_id)
+
+        second = coordinator.try_steal_now("B", idle_elapsed_seconds=0)
+
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.assertEqual(second.batch.copies, 1)
+        self.assertEqual(coordinator.remaining_for_worker("A"), 2)
+
     def test_donor_single_remaining_copy_is_not_stolen(self) -> None:
         item = task(copies=1)
         workers = [worker("A"), worker("B")]

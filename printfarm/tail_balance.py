@@ -39,6 +39,7 @@ class TailBalanceCoordinator:
         self._active: dict[int, _ActiveBatch] = {}
         self._worker_active: dict[str, int] = {}
         self._idle_since: dict[str, float] = {}
+        self._tail_ready: set[str] = set()
         self._dispatch_closed = False
         self._outstanding_batches = 0
         self._next_active_id = 1
@@ -69,7 +70,8 @@ class TailBalanceCoordinator:
             with self._condition:
                 own_queue = self._pending.setdefault(worker_name, deque())
                 if own_queue:
-                    self._idle_since.pop(worker_name, None)
+                    if worker_name not in self._tail_ready:
+                        self._idle_since.pop(worker_name, None)
                     return self._start_assignment_locked(worker_name, own_queue.popleft())
 
                 if self._dispatch_closed and self._outstanding_batches <= 0:
@@ -79,13 +81,20 @@ class TailBalanceCoordinator:
                     self._condition.wait(0.1)
                     continue
 
+                if worker_name in self._tail_ready:
+                    assignment = self._try_steal_locked(worker_name)
+                    if assignment is not None:
+                        return assignment
+                    self._condition.wait(0.1)
+                    continue
+
                 now = time.monotonic()
                 idle_since = self._idle_since.setdefault(worker_name, now)
                 idle_elapsed = now - idle_since
                 if idle_elapsed >= self.idle_seconds:
+                    self._tail_ready.add(worker_name)
                     assignment = self._try_steal_locked(worker_name)
                     if assignment is not None:
-                        self._idle_since.pop(worker_name, None)
                         return assignment
 
                 wait_seconds = max(0.05, min(0.5, self.idle_seconds - idle_elapsed))
@@ -93,10 +102,11 @@ class TailBalanceCoordinator:
 
     def try_steal_now(self, worker_name: str, idle_elapsed_seconds: float) -> TailBalanceAssignment | None:
         with self._condition:
-            if idle_elapsed_seconds < self.idle_seconds:
+            if worker_name not in self._tail_ready and idle_elapsed_seconds < self.idle_seconds:
                 return None
             if not self._dispatch_closed:
                 return None
+            self._tail_ready.add(worker_name)
             return self._try_steal_locked(worker_name)
 
     def claim_active_copy(self, worker_name: str, active_id: int) -> bool:
