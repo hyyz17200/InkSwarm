@@ -54,7 +54,7 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.2.2"
 DEBUG_LOG_NAME = "debug.log"
 
 
@@ -330,8 +330,12 @@ class MainWindow(QMainWindow):
         self.spool_progress_bar = QProgressBar()
         self.spool_progress_bar.setRange(0, 1)
         self.spool_progress_bar.setValue(0)
-        self.spool_progress_bar.setTextVisible(True)
-        self.spool_progress_bar.setFormat("已发送: 0 / 0")
+        self.spool_progress_bar.setTextVisible(False)
+        self.spool_progress_label = QLabel("已发送: 0 / 0")
+        self.spool_progress_label.setObjectName("spoolProgressLabel")
+        self.spool_progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.spool_progress_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        controls_layout.addWidget(self.spool_progress_label)
         controls_layout.addWidget(self.spool_progress_bar)
         controls_layout.addStretch(1)
 
@@ -435,7 +439,7 @@ class MainWindow(QMainWindow):
         self.restart_spooler_action.triggered.connect(self.restart_print_queue)
         menu.addAction(self.restart_spooler_action)
 
-        help_action = QAction("帮助", self)
+        help_action = QAction("关于", self)
         help_action.triggered.connect(self.open_help_dialog)
         menu.addAction(help_action)
 
@@ -568,20 +572,40 @@ class MainWindow(QMainWindow):
         self.apply_ui_scale(new_scale)
 
     def open_help_dialog(self) -> None:
-        QMessageBox.information(
-            self,
-            f"关于 {APP_NAME}",
-            f"{APP_NAME} {APP_VERSION}\n\n"
-            "软件逻辑：\n"
-            "将文件列表中的每个条目视为一个任务，先按 Worker 的速度比例分配总张数，再按轮询顺序投递到各台打印机。相同 Worker 对同一任务只会进行一次渲染与色彩转换，并复用缓存结果连续发送。可选的尾段动态均衡会在静态分配队列接近结束时，让空闲超时后的 Worker 进入接手状态，持续接手其他 Worker 尚未发送的剩余份数。可选的纸张方向自适应会在发送前统一旋转到 Portrait 或 Landscape。\n\n"
-            "基本流程：\n"
-            "1. 准备 Workers 目录组、打印机与 preset。\n"
-            "2. 根据需要为 preset 绑定 ICC 与驱动快照。\n"
-            "3. 拖入 PDF 或图片，设置每个任务的份数。\n"
-            "4. 启用需要参与工作的 Worker，确认速度和预设。\n"
-            "5. 开始发送，由调度器并行分发到各 Worker。\n\n"
-            "开发者：hyyz172000@gmail.com",
+        github_url = "https://github.com/hyyz17200/InkSwarm"
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"关于 {APP_NAME}")
+        dialog.setModal(True)
+        dialog.resize(460, 240)
+
+        layout = QVBoxLayout(dialog)
+
+        title = QLabel(f"{APP_NAME} {APP_VERSION}")
+        title_font = title.font()
+        title_font.setBold(True)
+        title_font.setPointSizeF(title_font.pointSizeF() + 2)
+        title.setFont(title_font)
+        layout.addWidget(title)
+
+        body = QLabel(
+            "<p>InkSwarm 是一款面向多打印机批量发送的桌面工具。</p>"
+            "<p>它可以导入 PDF 与图片任务，管理 Worker、打印机和预设配置，"
+            "按设定策略分配份数，并提供发送进度、运行日志和统计记录。</p>"
+            f'<p>GitHub：<a href="{github_url}">hyyz17200/InkSwarm</a></p>'
         )
+        body.setWordWrap(True)
+        body.setTextFormat(Qt.TextFormat.RichText)
+        body.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        body.setOpenExternalLinks(False)
+        body.linkActivated.connect(lambda _link: QDesktopServices.openUrl(QUrl(github_url)))
+        layout.addWidget(body)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        dialog.exec()
 
     def _apply_app_icon(self) -> None:
         for name in ("app.ico", "inkswarm.ico"):
@@ -989,7 +1013,7 @@ class MainWindow(QMainWindow):
         self._spool_total = prepared.spool_total
         self.spool_progress_bar.setRange(0, max(1, self._spool_total))
         self.spool_progress_bar.setValue(0)
-        self.spool_progress_bar.setFormat(f"已发送: 0 / {self._spool_total}")
+        self.spool_progress_label.setText(f"已发送: 0 / {self._spool_total}")
         debug_log(f"start_run with options={prepared.run_options} tasks={[(t.file_name(), t.copies) for t in prepared.tasks]}")
         try:
             self.controller.start(prepared.tasks, prepared.workers, prepared.run_options)
@@ -1216,7 +1240,7 @@ class MainWindow(QMainWindow):
         self._spool_total = max(0, int(total))
         self.spool_progress_bar.setRange(0, max(1, self._spool_total))
         self.spool_progress_bar.setValue(max(0, int(sent)))
-        self.spool_progress_bar.setFormat(f"已发送: {int(sent)} / {self._spool_total}")
+        self.spool_progress_label.setText(f"已发送: {int(sent)} / {self._spool_total}")
 
     def on_task_status(self, status: TaskStatusMessage) -> None:
         task = self.task_service.apply_status(self.tasks, status)
