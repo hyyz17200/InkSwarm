@@ -59,6 +59,8 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 APP_NAME = "InkSwarm"
 APP_VERSION = "0.2.3"
 DEBUG_LOG_NAME = "debug.log"
+DEFAULT_WINDOW_WIDTH = 1450
+DEFAULT_WINDOW_HEIGHT = 940
 # Edit these three values to tune the vertical pane heights: task, worker, log.
 DEFAULT_VERTICAL_PANE_HEIGHTS = (320, 420, 320)
 STATISTICS_HIDDEN_COLUMNS = {"运行ID"}
@@ -135,7 +137,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
-        self.resize(1450, 940)
+        self.resize(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
 
         self.root_dir = get_app_root()
         self._apply_app_icon()
@@ -162,6 +164,7 @@ class MainWindow(QMainWindow):
         debug_log(f"settings loaded {self.app_settings}")
         self.set_console_visibility(False)
         self.current_worker_group = self.app_settings.get("active_worker_group", self.store.default_group_dir().name)
+        self.resize(self._saved_window_width(), DEFAULT_WINDOW_HEIGHT)
 
         self.tasks: list[TaskItem] = []
         self.task_row_by_id: dict[str, int] = {}
@@ -719,10 +722,13 @@ class MainWindow(QMainWindow):
         )
 
     def _apply_vertical_pane_layout(self, scale: int) -> None:
-        task_height, worker_height, log_height = self._scaled_vertical_pane_heights(scale)
+        self._apply_vertical_pane_heights(self._scaled_vertical_pane_heights(scale))
+
+    def _apply_vertical_pane_heights(self, pane_heights: tuple[int, int, int]) -> None:
+        task_height, worker_height, log_height = pane_heights
         lower_height = worker_height + log_height
-        self.bottom_splitter.setSizes([worker_height, log_height])
         self.main_splitter.setSizes([task_height, lower_height])
+        self.bottom_splitter.setSizes([worker_height, log_height])
         self.bottom_splitter.setStretchFactor(0, worker_height)
         self.bottom_splitter.setStretchFactor(1, log_height)
         self.main_splitter.setStretchFactor(0, task_height)
@@ -768,7 +774,66 @@ class MainWindow(QMainWindow):
             return
         self._ui_scale_applied_once = True
         self.apply_ui_scale(self._saved_ui_scale)
+        self._restore_saved_window_layout()
         self.set_console_visibility(False)
+
+    @staticmethod
+    def _coerce_int(value: object) -> int | None:
+        if not isinstance(value, (str, int, float)):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _coerce_window_width(value: object) -> int:
+        width = MainWindow._coerce_int(value)
+        if width is None:
+            return DEFAULT_WINDOW_WIDTH
+        return max(800, width)
+
+    @staticmethod
+    def _coerce_vertical_pane_heights(value: object) -> tuple[int, int, int] | None:
+        if not isinstance(value, (list, tuple)) or len(value) != 3:
+            return None
+        heights: list[int] = []
+        for item in value:
+            height = MainWindow._coerce_int(item)
+            if height is None:
+                return None
+            if height < 0:
+                return None
+            heights.append(height)
+        if sum(heights) <= 0:
+            return None
+        return heights[0], heights[1], heights[2]
+
+    def _saved_window_width(self) -> int:
+        return self._coerce_window_width(self.app_settings.get("window_width", DEFAULT_WINDOW_WIDTH))
+
+    def _saved_vertical_pane_heights(self) -> tuple[int, int, int] | None:
+        return self._coerce_vertical_pane_heights(self.app_settings.get("vertical_pane_heights"))
+
+    def _restore_saved_window_layout(self) -> None:
+        self.resize(self._saved_window_width(), self.height())
+        pane_heights = self._saved_vertical_pane_heights()
+        if pane_heights is not None:
+            self._apply_vertical_pane_heights(pane_heights)
+
+    def _current_vertical_pane_heights(self) -> tuple[int, int, int] | None:
+        main_sizes = self.main_splitter.sizes()
+        bottom_sizes = self.bottom_splitter.sizes()
+        if len(main_sizes) < 2 or len(bottom_sizes) < 2:
+            return None
+        pane_heights = (int(main_sizes[0]), int(bottom_sizes[0]), int(bottom_sizes[1]))
+        return self._coerce_vertical_pane_heights(pane_heights)
+
+    def _remember_window_layout(self) -> None:
+        self.app_settings["window_width"] = int(self.width())
+        pane_heights = self._current_vertical_pane_heights()
+        if pane_heights is not None:
+            self.app_settings["vertical_pane_heights"] = list(pane_heights)
 
     @staticmethod
     def _display_worker_group_name(group_name: str) -> str:
@@ -1458,6 +1523,7 @@ class MainWindow(QMainWindow):
         self.save_worker_settings()
         self.app_settings["active_worker_group"] = self.current_worker_group
         self.app_settings["task_default_copies"] = int(self.task_copies_value_box.value())
+        self._remember_window_layout()
         self.store.save_app_settings(self.app_settings)
         if self.app_settings.get("save_tasks_on_exit", False):
             self.task_service.save_session(self.tasks)

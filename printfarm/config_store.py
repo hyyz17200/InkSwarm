@@ -165,6 +165,8 @@ class ConfigStore:
             "rip_limit_ppi": 300,
             "font_engine": "auto",
             "task_default_copies": 1,
+            "window_width": 1450,
+            "vertical_pane_heights": None,
         }
         if not self.paths.settings_file.exists():
             return defaults
