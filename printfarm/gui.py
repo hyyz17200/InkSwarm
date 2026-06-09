@@ -57,7 +57,7 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.2.5"
+APP_VERSION = "0.2.6"
 DEBUG_LOG_NAME = "debug.log"
 DEFAULT_WINDOW_WIDTH = 1450
 DEFAULT_WINDOW_HEIGHT = 940
@@ -255,21 +255,21 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(self.top_splitter, 1)
 
         task_buttons = QHBoxLayout()
-        btn_add = QPushButton("添加文件")
-        btn_add.clicked.connect(self.pick_files)
-        btn_remove = QPushButton("移除选中")
-        btn_remove.clicked.connect(self.remove_selected_tasks)
-        btn_clear = QPushButton("清空任务")
-        btn_clear.clicked.connect(self.clear_tasks)
-        btn_copies = QPushButton("批量设置份数")
-        btn_copies.clicked.connect(self.set_selected_task_copies)
+        self.btn_add_tasks = QPushButton("添加文件")
+        self.btn_add_tasks.clicked.connect(self.pick_files)
+        self.btn_remove_tasks = QPushButton("移除选中")
+        self.btn_remove_tasks.clicked.connect(self.remove_selected_tasks)
+        self.btn_clear_tasks = QPushButton("清空任务")
+        self.btn_clear_tasks.clicked.connect(self.clear_tasks)
+        self.btn_set_task_copies = QPushButton("批量设置份数")
+        self.btn_set_task_copies.clicked.connect(self.set_selected_task_copies)
         self.task_copies_value_box = QSpinBox()
         self.task_copies_value_box.setRange(1, 9999)
         self.task_copies_value_box.setValue(self._task_default_copies())
         self.task_copies_value_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.task_copies_value_box.setFixedWidth(88)
         self.task_copies_value_box.valueChanged.connect(self.on_task_default_copies_changed)
-        for btn in [btn_add, btn_remove, btn_clear, btn_copies]:
+        for btn in [self.btn_add_tasks, self.btn_remove_tasks, self.btn_clear_tasks, self.btn_set_task_copies]:
             task_buttons.addWidget(btn)
         task_buttons.addWidget(self.task_copies_value_box)
         task_buttons.addStretch(1)
@@ -890,7 +890,20 @@ class MainWindow(QMainWindow):
             self.on_log_text(f"已添加 {result.add_result.added_count} 个任务。")
         self.on_log_text(f"已恢复 {result.requested_count} 个上次任务。")
 
+    def _set_task_editing_enabled(self, enabled: bool) -> None:
+        for widget in (
+            self.btn_add_tasks,
+            self.btn_remove_tasks,
+            self.btn_clear_tasks,
+            self.btn_set_task_copies,
+            self.task_copies_value_box,
+        ):
+            widget.setEnabled(enabled)
+        self.task_table.setAcceptDrops(enabled)
+
     def pick_files(self) -> None:
+        if self.controller.is_running():
+            return
         files, _ = QFileDialog.getOpenFileNames(
             self,
             "选择打印文件",
@@ -900,6 +913,8 @@ class MainWindow(QMainWindow):
         self.add_files([Path(f) for f in files])
 
     def add_files(self, files: list[Path]) -> None:
+        if self.controller.is_running():
+            return
         result = self.task_service.add_files(self.tasks, files, default_copies=self.task_copies_value_box.value())
         self.refresh_task_table()
         for skipped in result.skipped:
@@ -957,6 +972,7 @@ class MainWindow(QMainWindow):
         item.setToolTip(display_status)
 
     def refresh_task_table(self) -> None:
+        task_editing_enabled = not self.controller.is_running()
         self.task_table.setRowCount(len(self.tasks))
         self.task_row_by_id.clear()
         for row, task in enumerate(self.tasks):
@@ -964,7 +980,7 @@ class MainWindow(QMainWindow):
 
             enabled_box = QCheckBox()
             enabled_box.setChecked(task.enabled)
-            enabled_box.setEnabled(not self.controller.is_running())
+            enabled_box.setEnabled(task_editing_enabled)
             enabled_box.toggled.connect(lambda checked, task_id=task.task_id: self.on_task_enabled_changed(task_id, checked))
             self.task_table.setCellWidget(row, 0, self._centered_widget(enabled_box))
 
@@ -977,6 +993,7 @@ class MainWindow(QMainWindow):
             copies_box.setRange(1, 9999)
             copies_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
             copies_box.setValue(task.copies)
+            copies_box.setEnabled(task_editing_enabled)
             copies_box.valueChanged.connect(lambda value, task_id=task.task_id: self.on_task_copies_changed(task_id, value))
             self.task_table.setCellWidget(row, 2, copies_box)
 
@@ -993,6 +1010,8 @@ class MainWindow(QMainWindow):
         self.update_task_preview()
 
     def on_task_enabled_changed(self, task_id: str, enabled: bool) -> None:
+        if self.controller.is_running():
+            return
         task = self.task_service.set_task_enabled(self.tasks, task_id, enabled)
         if task is not None:
             self.refresh_task_row(task)
@@ -1008,9 +1027,13 @@ class MainWindow(QMainWindow):
         self.app_settings["task_default_copies"] = int(value)
 
     def on_task_copies_changed(self, task_id: str, value: int) -> None:
+        if self.controller.is_running():
+            return
         self.task_service.set_task_copies(self.tasks, task_id, value)
 
     def remove_selected_tasks(self) -> None:
+        if self.controller.is_running():
+            return
         rows = {index.row() for index in self.task_table.selectedIndexes()}
         self.task_service.remove_rows(self.tasks, rows)
         self.refresh_task_table()
@@ -1023,6 +1046,8 @@ class MainWindow(QMainWindow):
         self.refresh_task_table()
 
     def set_selected_task_copies(self) -> None:
+        if self.controller.is_running():
+            return
         rows = sorted({index.row() for index in self.task_table.selectedIndexes()})
         if not rows:
             return
@@ -1449,6 +1474,7 @@ class MainWindow(QMainWindow):
     def on_run_state_changed(self, running: bool) -> None:
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(running)
+        self._set_task_editing_enabled(not running)
         if running:
             self.start_button.setText("暂停")
             self.spool_progress_bar.setValue(0)
