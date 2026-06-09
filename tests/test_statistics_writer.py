@@ -7,7 +7,7 @@ import csv
 import tempfile
 import time
 
-from printfarm.statistics_writer import CSV_HEADER, StatisticsTaskRecord, MonthlyStatisticsWriter
+from printfarm.statistics_writer import CSV_HEADER, LEGACY_CSV_HEADER, StatisticsTaskRecord, MonthlyStatisticsWriter
 
 
 def ts(year: int, month: int, day: int, hour: int = 10, minute: int = 0, second: int = 0) -> float:
@@ -126,3 +126,68 @@ class MonthlyStatisticsWriterTests(TestCase):
             self.assertEqual(rows[0]["运行ID"], "legacy-000001")
             self.assertEqual(rows[1]["文件名"], "new.pdf")
             self.assertEqual(rows[1]["成功张数"], "2")
+
+    def test_read_monthly_report_normalizes_legacy_csv_without_rewriting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            csv_path = root / "2026-05.csv"
+            with csv_path.open("w", encoding="utf-8-sig", newline="") as fh:
+                writer_csv = csv.writer(fh)
+                writer_csv.writerow(LEGACY_CSV_HEADER)
+                writer_csv.writerow(["2026-05-01 09:00:00", "legacy.pdf", "7"])
+
+            writer = MonthlyStatisticsWriter(root)
+            report = writer.read_monthly_report("2026-05")
+
+            self.assertTrue(report.exists)
+            self.assertEqual(report.month, "2026-05")
+            self.assertEqual(report.header, tuple(CSV_HEADER))
+            self.assertEqual(len(report.rows), 1)
+            self.assertEqual(report.rows[0][2], "legacy.pdf")
+            self.assertEqual(report.rows[0][3], "7")
+            self.assertEqual(report.rows[0][4], "7")
+            self.assertEqual(report.rows[0][7], "legacy-000001")
+            self.assertEqual(report.total_success_copies, 7)
+            with csv_path.open("r", encoding="utf-8-sig", newline="") as fh:
+                raw_rows = list(csv.reader(fh))
+            self.assertEqual(raw_rows[0], LEGACY_CSV_HEADER)
+
+    def test_read_daily_report_filters_current_month_rows_by_start_date(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            csv_path = root / "2026-05.csv"
+            with csv_path.open("w", encoding="utf-8-sig", newline="") as fh:
+                writer_csv = csv.writer(fh)
+                writer_csv.writerow(CSV_HEADER)
+                writer_csv.writerow([
+                    "2026-05-04 09:00:00",
+                    "2026-05-04 09:10:00",
+                    "today.pdf",
+                    "3",
+                    "3",
+                    "0",
+                    "完成",
+                    "run-today",
+                    "task-today",
+                ])
+                writer_csv.writerow([
+                    "2026-05-05 09:00:00",
+                    "2026-05-05 09:10:00",
+                    "other-day.pdf",
+                    "2",
+                    "2",
+                    "0",
+                    "完成",
+                    "run-other-day",
+                    "task-other-day",
+                ])
+
+            writer = MonthlyStatisticsWriter(root)
+            report = writer.read_daily_report("2026-05-04")
+
+            self.assertTrue(report.exists)
+            self.assertEqual(report.month, "2026-05")
+            self.assertEqual(report.csv_path, csv_path)
+            self.assertEqual(len(report.rows), 1)
+            self.assertEqual(report.rows[0][2], "today.pdf")
+            self.assertEqual(report.total_success_copies, 3)

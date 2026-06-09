@@ -45,6 +45,31 @@ class StatisticsFlushResult:
         return not self.errors and self.pending_runs == 0
 
 
+@dataclass(frozen=True)
+class MonthlyStatisticsReport:
+    month: str
+    csv_path: Path
+    exists: bool
+    header: tuple[str, ...]
+    rows: tuple[tuple[str, ...], ...]
+
+    @property
+    def total_success_copies(self) -> int:
+        try:
+            success_index = self.header.index("成功张数")
+        except ValueError:
+            success_index = 4
+        total = 0
+        for row in self.rows:
+            if len(row) <= success_index:
+                continue
+            try:
+                total += max(0, int(row[success_index]))
+            except (TypeError, ValueError):
+                continue
+        return total
+
+
 class MonthlyStatisticsWriter:
     def __init__(self, statistics_dir: Path) -> None:
         self.statistics_dir = statistics_dir
@@ -154,6 +179,48 @@ class MonthlyStatisticsWriter:
         if not result.ok:
             message = "; ".join(result.errors) or f"{result.pending_runs} pending runs"
             raise PermissionError(message)
+
+    def read_monthly_report(self, month: str | None = None) -> MonthlyStatisticsReport:
+        selected_month = self._safe_month(month)
+        target = self.statistics_dir / f"{selected_month}.csv"
+        with self._lock:
+            raw_rows = self._read_csv_rows(target)
+            rows = self._normalize_csv_rows(raw_rows)
+            exists = target.exists()
+        return MonthlyStatisticsReport(
+            month=selected_month,
+            csv_path=target,
+            exists=exists,
+            header=tuple(CSV_HEADER),
+            rows=tuple(tuple(row) for row in rows),
+        )
+
+    def read_daily_report(self, day: str | None = None) -> MonthlyStatisticsReport:
+        selected_day = self._safe_day(day)
+        report = self.read_monthly_report(selected_day[:7])
+        return MonthlyStatisticsReport(
+            month=report.month,
+            csv_path=report.csv_path,
+            exists=report.exists,
+            header=report.header,
+            rows=tuple(row for row in report.rows if row and row[0].startswith(selected_day)),
+        )
+
+    def _safe_month(self, month: str | None = None) -> str:
+        if month is None:
+            return time.strftime("%Y-%m", time.localtime())
+        value = str(month).strip()
+        if not re.fullmatch(r"\d{4}-\d{2}", value):
+            raise ValueError(f"invalid statistics month: {month!r}")
+        return value
+
+    def _safe_day(self, day: str | None = None) -> str:
+        if day is None:
+            return time.strftime("%Y-%m-%d", time.localtime())
+        value = str(day).strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise ValueError(f"invalid statistics day: {day!r}")
+        return value
 
     def _safe_run_id(self, run_id: str) -> str:
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(run_id)).strip("._")

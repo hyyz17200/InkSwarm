@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
 from pathlib import Path
 import os
 import sys
@@ -31,6 +32,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
+    QTabBar,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -44,6 +47,7 @@ from .local_logger import LocalLogWriter, RegularLogFilter
 from .models import SUPPORTED_INPUT_SUFFIXES, TaskItem, TaskStatusMessage, WorkerConfig, WorkerStatusMessage
 from .run_service import RunService
 from .spooler_service import SpoolerMaintenance, SpoolerMaintenanceCancelled, run_elevated_spooler_maintenance
+from .statistics_writer import CSV_HEADER, MonthlyStatisticsWriter
 from .task_service import TaskService
 from .worker_service import WorkerService
 from .debug_logger import debug_exception, debug_log, initialize_debug_logging, install_qt_message_handler
@@ -122,6 +126,7 @@ class MainWindow(QMainWindow):
         self.spooler_maintenance_finished.connect(self.on_spooler_maintenance_finished)
         self.log_writer = LocalLogWriter(self.store.paths.logs_dir)
         self.regular_log_filter = RegularLogFilter()
+        self.statistics_report_reader = MonthlyStatisticsWriter(self.store.paths.statistics_dir)
         self.debug_log_path = (self.store.paths.logs_dir / DEBUG_LOG_NAME).resolve()
         debug_log(f"mainwindow init root_dir={self.root_dir}")
         self.app_settings = self.store.load_app_settings()
@@ -283,15 +288,15 @@ class MainWindow(QMainWindow):
         self.worker_group_combo.currentIndexChanged.connect(self.on_worker_group_changed)
         worker_buttons.addWidget(self.worker_group_combo)
 
-        btn_reload_workers = QPushButton("重载 Worker")
+        btn_reload_workers = QPushButton("重载Worker")
         btn_reload_workers.clicked.connect(self.reload_workers)
-        btn_save_workers = QPushButton("保存 Worker 设定")
+        btn_save_workers = QPushButton("保存Worker设定")
         btn_save_workers.clicked.connect(self.save_worker_settings)
         btn_open_pref = QPushButton("打开驱动首选项")
         btn_open_pref.clicked.connect(self.open_selected_worker_preferences)
         btn_open_props = QPushButton("打开打印机属性")
         btn_open_props.clicked.connect(self.open_selected_worker_properties)
-        btn_capture = QPushButton("导出当前驱动设定")
+        btn_capture = QPushButton("保存驱动设定")
         btn_capture.clicked.connect(self.capture_selected_worker_snapshot)
         for btn in [btn_reload_workers, btn_save_workers, btn_open_pref, btn_open_props, btn_capture]:
             worker_buttons.addWidget(btn)
@@ -326,7 +331,7 @@ class MainWindow(QMainWindow):
         self.spool_progress_bar.setRange(0, 1)
         self.spool_progress_bar.setValue(0)
         self.spool_progress_bar.setTextVisible(True)
-        self.spool_progress_bar.setFormat("已发送到 Spooler: 0 / 0")
+        self.spool_progress_bar.setFormat("已发送: 0 / 0")
         controls_layout.addWidget(self.spool_progress_bar)
         controls_layout.addStretch(1)
 
@@ -339,10 +344,63 @@ class MainWindow(QMainWindow):
         log_layout = QVBoxLayout(log_panel)
         log_layout.setContentsMargins(8, 8, 8, 8)
         log_layout.setSpacing(6)
-        self._add_section_header(log_layout, "日志")
+        log_header = QHBoxLayout()
+        self.log_card_tabs = QTabBar()
+        self.log_card_tabs.setDrawBase(False)
+        self.log_card_tabs.addTab("日志")
+        self.log_card_tabs.addTab("今日统计")
+        self.log_card_tabs.addTab("本月统计")
+        self.log_card_tabs.addTab("上月统计")
+        self.log_card_tabs.currentChanged.connect(self.on_log_card_changed)
+        log_header.addWidget(self.log_card_tabs)
+        log_header.addStretch(1)
+        log_layout.addLayout(log_header)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        log_layout.addWidget(line)
+
+        self.log_stack = QStackedWidget()
+
+        log_page = QWidget()
+        log_page_layout = QVBoxLayout(log_page)
+        log_page_layout.setContentsMargins(0, 0, 0, 0)
+        log_page_layout.setSpacing(0)
         self.log_edit = QPlainTextEdit()
         self.log_edit.setReadOnly(True)
-        log_layout.addWidget(self.log_edit, 1)
+        log_page_layout.addWidget(self.log_edit, 1)
+        self.log_stack.addWidget(log_page)
+
+        self.statistics_status_labels: dict[str, QLabel] = {}
+        self.statistics_tables: dict[str, QTableWidget] = {}
+        for statistics_key in ("today", "current_month", "previous_month"):
+            statistics_page = QWidget()
+            statistics_layout = QVBoxLayout(statistics_page)
+            statistics_layout.setContentsMargins(0, 0, 0, 0)
+            statistics_layout.setSpacing(6)
+            statistics_status_label = QLabel("")
+            statistics_table = QTableWidget()
+            statistics_table.setColumnCount(len(CSV_HEADER))
+            statistics_table.setHorizontalHeaderLabels(CSV_HEADER)
+            statistics_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            statistics_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+            statistics_table.setSelectionMode(QAbstractItemView.SingleSelection)
+            statistics_table.setAlternatingRowColors(True)
+            statistics_table.setWordWrap(False)
+            statistics_header = statistics_table.horizontalHeader()
+            for column in range(len(CSV_HEADER)):
+                statistics_header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+            if len(CSV_HEADER) > 2:
+                statistics_header.setSectionResizeMode(2, QHeaderView.Stretch)
+            statistics_layout.addWidget(statistics_status_label)
+            statistics_layout.addWidget(statistics_table, 1)
+            self.statistics_status_labels[statistics_key] = statistics_status_label
+            self.statistics_tables[statistics_key] = statistics_table
+            self.log_stack.addWidget(statistics_page)
+        log_layout.addWidget(self.log_stack, 1)
+        self.log_card_tabs.setCurrentIndex(0)
+        self.log_stack.setCurrentIndex(0)
 
         self.bottom_splitter.addWidget(worker_panel)
         self.bottom_splitter.addWidget(log_panel)
@@ -365,15 +423,15 @@ class MainWindow(QMainWindow):
         settings_action.triggered.connect(self.open_settings_dialog)
         menu.addAction(settings_action)
 
-        open_root_action = QAction("打开程序主目录", self)
+        open_root_action = QAction("程序目录", self)
         open_root_action.triggered.connect(self.open_program_dir)
         menu.addAction(open_root_action)
 
-        print_mgmt_action = QAction("启动打印管理器", self)
+        print_mgmt_action = QAction("打印管理器", self)
         print_mgmt_action.triggered.connect(self.open_print_management)
         menu.addAction(print_mgmt_action)
 
-        self.restart_spooler_action = QAction("重启打印队列", self)
+        self.restart_spooler_action = QAction("重启队列", self)
         self.restart_spooler_action.triggered.connect(self.restart_print_queue)
         menu.addAction(self.restart_spooler_action)
 
@@ -852,7 +910,7 @@ class MainWindow(QMainWindow):
             worker.active_preset = preset_combo.currentText() if preset_combo is not None else worker.active_preset
             worker.weight = int(weight_box.value()) if weight_box is not None else worker.weight
         self.worker_service.save_workers(self.workers)
-        self.on_log_text("Worker 配置已保存。")
+        self.on_log_text("Worker配置已保存。")
 
     def _selected_worker(self) -> WorkerConfig | None:
         row = self.worker_table.currentRow()
@@ -931,7 +989,7 @@ class MainWindow(QMainWindow):
         self._spool_total = prepared.spool_total
         self.spool_progress_bar.setRange(0, max(1, self._spool_total))
         self.spool_progress_bar.setValue(0)
-        self.spool_progress_bar.setFormat(f"已发送到 Spooler: 0 / {self._spool_total}")
+        self.spool_progress_bar.setFormat(f"已发送: 0 / {self._spool_total}")
         debug_log(f"start_run with options={prepared.run_options} tasks={[(t.file_name(), t.copies) for t in prepared.tasks]}")
         try:
             self.controller.start(prepared.tasks, prepared.workers, prepared.run_options)
@@ -1058,6 +1116,95 @@ class MainWindow(QMainWindow):
     def on_log(self, message) -> None:
         self.on_log_text(message.format())
 
+    def on_log_card_changed(self, index: int) -> None:
+        self.log_stack.setCurrentIndex(index)
+        showing_statistics = self._statistics_card_context(index) is not None
+        if showing_statistics:
+            self.refresh_statistics_table()
+
+    def _statistics_card_context(self, index: int | None = None) -> tuple[str, str, str | None] | None:
+        current_index = self.log_card_tabs.currentIndex() if index is None else index
+        today = date.today()
+        if current_index == 1:
+            return ("today", today.strftime("%Y-%m-%d"), None)
+        if current_index == 2:
+            month = today.strftime("%Y-%m")
+            return ("current_month", f"{month}.csv", month)
+        if current_index == 3:
+            previous_month_day = today.replace(day=1) - timedelta(days=1)
+            previous_month = previous_month_day.strftime("%Y-%m")
+            return ("previous_month", f"{previous_month}.csv", previous_month)
+        return None
+
+    def refresh_statistics_table(self) -> None:
+        context = self._statistics_card_context()
+        if context is None:
+            return
+        statistics_key, display_label, month = context
+        status_label = self.statistics_status_labels[statistics_key]
+        table = self.statistics_tables[statistics_key]
+        try:
+            if statistics_key == "today":
+                report = self.statistics_report_reader.read_daily_report(display_label)
+            else:
+                report = self.statistics_report_reader.read_monthly_report(month)
+        except Exception as exc:
+            debug_exception("MainWindow.refresh_statistics_table", exc)
+            status_label.setText(f"读取统计 CSV 失败: {exc}")
+            table.setRowCount(0)
+            return
+
+        self._populate_statistics_table(table, report.header, report.rows)
+        status_label.setText(
+            self._statistics_status_text(
+                statistics_key,
+                display_label,
+                report.exists,
+                len(report.rows),
+                report.total_success_copies,
+            )
+        )
+
+    def _populate_statistics_table(self, table: QTableWidget, header: tuple[str, ...], rows: tuple[tuple[str, ...], ...]) -> None:
+        table.setSortingEnabled(False)
+        table.setColumnCount(len(header))
+        table.setHorizontalHeaderLabels(list(header))
+        table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            for column_index, value in enumerate(row):
+                item = QTableWidgetItem(str(value))
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                if column_index in {0, 1, 3, 4, 5, 6}:
+                    item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row_index, column_index, item)
+
+    def _statistics_status_text(
+        self,
+        statistics_key: str,
+        display_label: str,
+        exists: bool,
+        row_count: int,
+        total_success_copies: int,
+    ) -> str:
+        success_text = f"总成功张数: {total_success_copies}"
+        if statistics_key == "today":
+            if not exists:
+                return f"{display_label} - 本月还没有统计 CSV - {success_text}"
+            if row_count:
+                return f"{display_label} - {row_count} 条今日任务记录 - {success_text}"
+            return f"{display_label} - 今日暂无任务记录 - {success_text}"
+        if statistics_key == "previous_month":
+            if not exists:
+                return f"{display_label} - 上月还没有统计 CSV - {success_text}"
+            if row_count:
+                return f"{display_label} - {row_count} 条上月任务记录 - {success_text}"
+            return f"{display_label} - 上月暂无任务记录 - {success_text}"
+        if not exists:
+            return f"{display_label} - 本月还没有统计 CSV - {success_text}"
+        if row_count:
+            return f"{display_label} - {row_count} 条本月任务记录 - {success_text}"
+        return f"{display_label} - 本月暂无任务记录 - {success_text}"
+
     def on_log_text(self, text: str) -> None:
         debug_log(f"app-log {text}")
         if not self.regular_log_filter.should_write(text):
@@ -1069,7 +1216,7 @@ class MainWindow(QMainWindow):
         self._spool_total = max(0, int(total))
         self.spool_progress_bar.setRange(0, max(1, self._spool_total))
         self.spool_progress_bar.setValue(max(0, int(sent)))
-        self.spool_progress_bar.setFormat(f"已发送到 Spooler: {int(sent)} / {self._spool_total}")
+        self.spool_progress_bar.setFormat(f"已发送: {int(sent)} / {self._spool_total}")
 
     def on_task_status(self, status: TaskStatusMessage) -> None:
         task = self.task_service.apply_status(self.tasks, status)
@@ -1111,6 +1258,8 @@ class MainWindow(QMainWindow):
             self.start_button.setText("开始发送")
         self.refresh_task_table()
         self.on_log_text("流程已启动。" if running else "流程已结束。")
+        if not running and self._statistics_card_context() is not None:
+            self.refresh_statistics_table()
 
     def on_pause_state_changed(self, paused: bool) -> None:
         if not self.controller.is_running():
