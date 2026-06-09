@@ -9,7 +9,7 @@ import threading
 
 
 from PySide6.QtCore import Qt, QUrl, QTimer, Signal
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QPixmap
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -33,6 +33,9 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStackedWidget,
+    QStyle,
+    QStyleOptionComboBox,
+    QStylePainter,
     QTabBar,
     QTableWidget,
     QTableWidgetItem,
@@ -54,8 +57,11 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.2.3"
 DEBUG_LOG_NAME = "debug.log"
+# Edit these three values to tune the vertical pane heights: task, worker, log.
+DEFAULT_VERTICAL_PANE_HEIGHTS = (320, 420, 320)
+STATISTICS_HIDDEN_COLUMNS = {"运行ID"}
 
 
 def get_app_root() -> Path:
@@ -97,6 +103,29 @@ class FileDropTable(QTableWidget):
             event.acceptProposedAction()
         else:
             event.ignore()
+
+
+class CenteredComboBox(QComboBox):
+    def paintEvent(self, event) -> None:
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        painter = QStylePainter(self)
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
+
+        text_rect = self.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox,
+            option,
+            QStyle.SubControl.SC_ComboBoxEditField,
+            self,
+        )
+        color_group = QPalette.ColorGroup.Disabled if not self.isEnabled() else QPalette.ColorGroup.Active
+        painter.setPen(option.palette.color(color_group, QPalette.ColorRole.ButtonText))
+        text = option.fontMetrics.elidedText(self.currentText(), Qt.TextElideMode.ElideRight, text_rect.width())
+        painter.drawText(
+            text_rect,
+            Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter,
+            text,
+        )
 
 
 class MainWindow(QMainWindow):
@@ -184,8 +213,8 @@ class MainWindow(QMainWindow):
         self.top_splitter = QSplitter(Qt.Orientation.Horizontal)
 
         self.task_table = FileDropTable(self.add_files)
-        self.task_table.setColumnCount(6)
-        self.task_table.setHorizontalHeaderLabels(["启用", "文件", "份数", "打印尺寸", "状态", "分配"])
+        self.task_table.setColumnCount(5)
+        self.task_table.setHorizontalHeaderLabels(["启用", "文件", "份数", "打印尺寸", "状态"])
         self.task_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.task_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.task_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -195,11 +224,10 @@ class MainWindow(QMainWindow):
         self.task_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         self.task_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
         self.task_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self.task_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.task_table.setColumnWidth(0, 56)
         self.task_table.setColumnWidth(2, 88)
-        self.task_table.setColumnWidth(3, 160)
-        self.task_table.setColumnWidth(4, 160)
+        self.task_table.setColumnWidth(3, 230)
+        self.task_table.setColumnWidth(4, 250)
         self.task_table.itemSelectionChanged.connect(self.update_task_preview)
         self.top_splitter.addWidget(self.task_table)
 
@@ -269,9 +297,9 @@ class MainWindow(QMainWindow):
         self.worker_table.setAlternatingRowColors(True)
         header = self.worker_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.worker_table.setColumnWidth(0, 56)
@@ -279,6 +307,7 @@ class MainWindow(QMainWindow):
         self.worker_table.setColumnWidth(2, 150)
         self.worker_table.setColumnWidth(3, 225)
         self.worker_table.setColumnWidth(4, 82)
+        self.worker_table.setColumnWidth(5, 290)
         worker_left_layout.addWidget(self.worker_table, 1)
 
         worker_buttons = QHBoxLayout()
@@ -385,17 +414,18 @@ class MainWindow(QMainWindow):
             statistics_layout.setSpacing(6)
             statistics_status_label = QLabel("")
             statistics_table = QTableWidget()
-            statistics_table.setColumnCount(len(CSV_HEADER))
-            statistics_table.setHorizontalHeaderLabels(CSV_HEADER)
+            statistics_display_header = self._statistics_display_header(CSV_HEADER)
+            statistics_table.setColumnCount(len(statistics_display_header))
+            statistics_table.setHorizontalHeaderLabels(list(statistics_display_header))
             statistics_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
             statistics_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
             statistics_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
             statistics_table.setAlternatingRowColors(True)
             statistics_table.setWordWrap(False)
             statistics_header = statistics_table.horizontalHeader()
-            for column in range(len(CSV_HEADER)):
+            for column in range(len(statistics_display_header)):
                 statistics_header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
-            if len(CSV_HEADER) > 2:
+            if len(statistics_display_header) > 2:
                 statistics_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
             statistics_layout.addWidget(statistics_status_label)
             statistics_layout.addWidget(statistics_table, 1)
@@ -408,15 +438,10 @@ class MainWindow(QMainWindow):
 
         self.bottom_splitter.addWidget(worker_panel)
         self.bottom_splitter.addWidget(log_panel)
-        self.bottom_splitter.setSizes([470, 210])
-        self.bottom_splitter.setStretchFactor(0, 3)
-        self.bottom_splitter.setStretchFactor(1, 2)
 
         self.main_splitter.addWidget(top)
         self.main_splitter.addWidget(self.bottom_splitter)
-        self.main_splitter.setSizes([320, 620])
-        self.main_splitter.setStretchFactor(0, 2)
-        self.main_splitter.setStretchFactor(1, 3)
+        self._apply_vertical_pane_layout(100)
 
         layout.addWidget(self.main_splitter)
         self.setCentralWidget(central)
@@ -683,6 +708,26 @@ class MainWindow(QMainWindow):
             }}
         """
 
+    @staticmethod
+    def _scaled_vertical_pane_heights(scale: int) -> tuple[int, int, int]:
+        task_height, worker_height, log_height = DEFAULT_VERTICAL_PANE_HEIGHTS
+        normalized_scale = max(1, int(scale))
+        return (
+            max(1, round(task_height * normalized_scale / 100)),
+            max(1, round(worker_height * normalized_scale / 100)),
+            max(1, round(log_height * normalized_scale / 100)),
+        )
+
+    def _apply_vertical_pane_layout(self, scale: int) -> None:
+        task_height, worker_height, log_height = self._scaled_vertical_pane_heights(scale)
+        lower_height = worker_height + log_height
+        self.bottom_splitter.setSizes([worker_height, log_height])
+        self.main_splitter.setSizes([task_height, lower_height])
+        self.bottom_splitter.setStretchFactor(0, worker_height)
+        self.bottom_splitter.setStretchFactor(1, log_height)
+        self.main_splitter.setStretchFactor(0, task_height)
+        self.main_splitter.setStretchFactor(1, lower_height)
+
     def apply_ui_scale(self, scale: int) -> None:
         app = QApplication.instance()
         if isinstance(app, QApplication):
@@ -706,15 +751,16 @@ class MainWindow(QMainWindow):
         self.worker_table.setColumnWidth(2, max(130, round(150 * scale / 100)))
         self.worker_table.setColumnWidth(3, max(180, round(225 * scale / 100)))
         self.worker_table.setColumnWidth(4, max(76, round(82 * scale / 100)))
+        self.worker_table.setColumnWidth(5, max(110, round(290 * scale / 100)))
         self.task_copies_value_box.setFixedWidth(max(82, round(88 * scale / 100)))
         self.task_table.setColumnWidth(0, max(54, round(56 * scale / 100)))
         self.task_table.setColumnWidth(2, max(82, round(88 * scale / 100)))
-        status_width = max(145, round(160 * scale / 100))
-        self.task_table.setColumnWidth(3, status_width)
+        size_width = max(210, round(230 * scale / 100))
+        status_width = max(140, round(250 * scale / 100))
+        self.task_table.setColumnWidth(3, size_width)
         self.task_table.setColumnWidth(4, status_width)
         self.top_splitter.setSizes([max(860, round(1120 * scale / 100)), max(220, round(260 * scale / 100))])
-        self.bottom_splitter.setSizes([max(390, round(470 * scale / 100)), max(180, round(210 * scale / 100))])
-        self.main_splitter.setSizes([max(280, round(320 * scale / 100)), max(520, round(620 * scale / 100))])
+        self._apply_vertical_pane_layout(scale)
         self.update_task_preview()
 
     def apply_saved_startup_ui_state(self) -> None:
@@ -796,6 +842,55 @@ class MainWindow(QMainWindow):
         if result.added_count:
             self.on_log_text(f"已添加 {result.added_count} 个任务。")
 
+    @staticmethod
+    def _task_status_text(status: str) -> str:
+        status_text = (status or "").strip()
+        translations = {
+            "Pending": "待处理",
+            "Waiting": "等待中",
+            "Scheduling": "调度中",
+            "Queued": "已入队",
+            "Done": "完成",
+            "Error": "错误",
+            "Disabled": "已停用",
+        }
+        if status_text.startswith("Printing "):
+            return f"打印中 {status_text[len('Printing '):]}"
+        return translations.get(status_text, status_text)
+
+    @staticmethod
+    def _worker_status_text(status: str) -> str:
+        status_text = (status or "").strip()
+        translations = {
+            "Idle": "空闲",
+            "Stopped": "已停止",
+            "Stopping": "停止中",
+            "Error": "错误",
+            "Paused": "已暂停",
+        }
+        if status_text.startswith("Paused "):
+            return f"已暂停 {status_text[len('Paused '):]}"
+        if status_text.startswith("Preparing "):
+            return f"准备 {status_text[len('Preparing '):]}"
+        if status_text.startswith("Printing "):
+            return f"打印中 {status_text[len('Printing '):]}"
+        if status_text.startswith("Waiting printer "):
+            return f"等待打印机 {status_text[len('Waiting printer '):]}"
+        if status_text.startswith("Queue "):
+            return f"队列 {status_text[len('Queue '):]}"
+        return translations.get(status_text, status_text)
+
+    def _set_worker_status_item(self, row: int, status: str) -> None:
+        item = self.worker_table.item(row, 5)
+        if item is None:
+            item = QTableWidgetItem()
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.worker_table.setItem(row, 5, item)
+        display_status = self._worker_status_text(status)
+        item.setText(display_status)
+        item.setToolTip(display_status)
+
     def refresh_task_table(self) -> None:
         self.task_table.setRowCount(len(self.tasks))
         self.task_row_by_id.clear()
@@ -825,14 +920,10 @@ class MainWindow(QMainWindow):
             size_item.setFlags(size_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.task_table.setItem(row, 3, size_item)
 
-            status_item = QTableWidgetItem(task.status)
+            status_item = QTableWidgetItem(self._task_status_text(task.status))
             status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             status_item.setFlags(status_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.task_table.setItem(row, 4, status_item)
-
-            assigned_item = QTableWidgetItem(task.assigned_summary)
-            assigned_item.setFlags(assigned_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.task_table.setItem(row, 5, assigned_item)
 
         self.update_task_preview()
 
@@ -894,16 +985,23 @@ class MainWindow(QMainWindow):
             self.worker_table.setCellWidget(row, 0, self._centered_widget(enabled_box))
 
             name_item = QTableWidgetItem(worker.name)
+            name_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.worker_table.setItem(row, 1, name_item)
 
             printer_item = QTableWidgetItem(worker.printer_name)
+            printer_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.worker_table.setItem(row, 2, printer_item)
 
-            preset_combo = QComboBox()
+            preset_combo = CenteredComboBox()
             preset_names = sorted(worker.presets.keys())
             for preset_name in preset_names:
                 preset_combo.addItem(preset_name)
+                preset_combo.setItemData(
+                    preset_combo.count() - 1,
+                    Qt.AlignmentFlag.AlignCenter,
+                    Qt.ItemDataRole.TextAlignmentRole,
+                )
             active_index = preset_combo.findText(worker.active_preset)
             if active_index >= 0:
                 preset_combo.setCurrentIndex(active_index)
@@ -915,10 +1013,7 @@ class MainWindow(QMainWindow):
             weight_box.setValue(worker.weight)
             self.worker_table.setCellWidget(row, 4, weight_box)
 
-            status_item = QTableWidgetItem("Idle")
-            status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            status_item.setFlags(status_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.worker_table.setItem(row, 5, status_item)
+            self._set_worker_status_item(row, "Idle")
 
         self.on_log_text(f"已加载方案组 {self.current_worker_group}，共 {len(self.workers)} 个 Worker。")
 
@@ -1190,17 +1285,32 @@ class MainWindow(QMainWindow):
         )
 
     def _populate_statistics_table(self, table: QTableWidget, header: tuple[str, ...], rows: tuple[tuple[str, ...], ...]) -> None:
+        display_columns = self._statistics_display_columns(header)
+        display_header = tuple(header[column] for column in display_columns)
         table.setSortingEnabled(False)
-        table.setColumnCount(len(header))
-        table.setHorizontalHeaderLabels(list(header))
+        table.setColumnCount(len(display_header))
+        table.setHorizontalHeaderLabels(list(display_header))
         table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
-            for column_index, value in enumerate(row):
+            for display_index, source_index in enumerate(display_columns):
+                value = row[source_index] if source_index < len(row) else ""
                 item = QTableWidgetItem(str(value))
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                if column_index in {0, 1, 3, 4, 5, 6}:
+                if source_index in {0, 1, 3, 4, 5, 6}:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row_index, column_index, item)
+                table.setItem(row_index, display_index, item)
+
+    @staticmethod
+    def _statistics_display_columns(header: list[str] | tuple[str, ...]) -> tuple[int, ...]:
+        return tuple(
+            column_index
+            for column_index, column_name in enumerate(header)
+            if column_name not in STATISTICS_HIDDEN_COLUMNS
+        )
+
+    @classmethod
+    def _statistics_display_header(cls, header: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(header[column_index] for column_index in cls._statistics_display_columns(header))
 
     def _statistics_status_text(
         self,
@@ -1257,20 +1367,13 @@ class MainWindow(QMainWindow):
             return
         status_item = self.task_table.item(row, 4)
         if status_item is not None:
-            status_item.setText(task.status)
-        assigned_item = self.task_table.item(row, 5)
-        if assigned_item is not None:
-            assigned_item.setText(task.assigned_summary)
+            status_item.setText(self._task_status_text(task.status))
 
     def on_worker_status(self, status: WorkerStatusMessage) -> None:
         row = self.worker_row_by_name.get(status.worker_name)
         if row is None:
             return
-        item = self.worker_table.item(row, 5)
-        if item is None:
-            item = QTableWidgetItem()
-            self.worker_table.setItem(row, 5, item)
-        item.setText(status.status)
+        self._set_worker_status_item(row, status.status)
 
     def on_run_state_changed(self, running: bool) -> None:
         self.start_button.setEnabled(True)
