@@ -57,7 +57,7 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.2.3"
+APP_VERSION = "0.2.5"
 DEBUG_LOG_NAME = "debug.log"
 DEFAULT_WINDOW_WIDTH = 1450
 DEFAULT_WINDOW_HEIGHT = 940
@@ -1167,6 +1167,12 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "请至少勾选一个要发送的任务。")
             return
         self.save_worker_settings()
+        try:
+            self.controller.validate_environment()
+        except Exception as exc:
+            debug_exception("MainWindow.start_run.environment", exc)
+            QMessageBox.critical(self, "环境检查失败", str(exc))
+            return
         self.task_service.reset_for_run(self.tasks)
         self.refresh_task_table()
         prepared = self.run_service.prepare_start(self.tasks, self.workers, self.app_settings)
@@ -1568,6 +1574,12 @@ def run() -> None:
     app.setApplicationName(APP_NAME)
     install_qt_message_handler()
     debug_log(f"QApplication started argv={sys.argv}")
+    try:
+        PrintController.validate_environment()
+    except Exception as exc:
+        debug_exception("run.environment", exc)
+        QMessageBox.critical(None, "环境检查失败", str(exc))
+        sys.exit(1)
     window = MainWindow()
     window.show()
     debug_log("mainwindow shown")

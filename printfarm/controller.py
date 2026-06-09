@@ -264,9 +264,14 @@ class PrintController:
     def is_paused(self) -> bool:
         return self._pause_gate.is_paused()
 
+    @staticmethod
+    def validate_environment() -> None:
+        PrinterSpooler.validate_environment()
+
     def start(self, tasks: list[TaskItem], workers: list[WorkerConfig], run_options: RunOptions | None = None) -> None:
         if self.is_running():
             raise RuntimeError("当前已有流程正在运行")
+        self.validate_environment()
         options = run_options or RunOptions()
         self._flush_pending_statistics("start")
         self._stop_event.clear()

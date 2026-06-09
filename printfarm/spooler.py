@@ -20,17 +20,27 @@ win32print: Any = None
 
 class PrinterSpooler:
     def __init__(self) -> None:
-        self._ensure_windows_imports()
+        self.validate_environment()
         self._queue_waiting_states: dict[str, bool] = {}
         self._queue_pause_last_log_ts: dict[str, float] = {}
 
-    def _ensure_windows_imports(self) -> None:
+    @staticmethod
+    def validate_environment() -> None:
         if sys.platform != "win32":
-            raise RuntimeError("打印仅支持 Windows")
+            raise RuntimeError("InkSwarm printing is only supported on Windows.")
         global win32ui, win32con, win32print
-        import win32ui as _win32ui  # type: ignore
-        import win32con as _win32con  # type: ignore
-        import win32print as _win32print  # type: ignore
+        try:
+            import win32ui as _win32ui  # type: ignore
+            import win32con as _win32con  # type: ignore
+            import win32print as _win32print  # type: ignore
+        except ModuleNotFoundError as exc:
+            missing = exc.name or str(exc)
+            raise RuntimeError(
+                f"Windows printing dependency is missing: {missing}. "
+                "Install pywin32 in the Python environment running InkSwarm."
+            ) from exc
+        except ImportError as exc:
+            raise RuntimeError(f"Windows printing dependencies failed to import: {exc}") from exc
 
         win32ui = _win32ui
         win32con = _win32con
