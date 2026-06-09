@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 import threading
 import time
-from typing import Callable
+from typing import Any, Callable
 
 from PIL import Image, ImageFile, ImageWin
 
@@ -12,6 +12,10 @@ from .debug_logger import debug_exception, debug_log
 
 Image.MAX_IMAGE_PIXELS = None
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+win32ui: Any = None
+win32con: Any = None
+win32print: Any = None
 
 
 class PrinterSpooler:
@@ -24,9 +28,13 @@ class PrinterSpooler:
         if sys.platform != "win32":
             raise RuntimeError("打印仅支持 Windows")
         global win32ui, win32con, win32print
-        import win32ui  # type: ignore
-        import win32con  # type: ignore
-        import win32print  # type: ignore
+        import win32ui as _win32ui  # type: ignore
+        import win32con as _win32con  # type: ignore
+        import win32print as _win32print  # type: ignore
+
+        win32ui = _win32ui
+        win32con = _win32con
+        win32print = _win32print
 
     def get_queue_depth(self, printer_name: str) -> int:
         handle = win32print.OpenPrinter(printer_name)

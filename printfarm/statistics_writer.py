@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable, cast
 import csv
 import json
 import os
@@ -449,6 +449,6 @@ class MonthlyStatisticsWriter:
 
     def _safe_int(self, value: object) -> int:
         try:
-            return int(value)
+            return int(cast(Any, value))
         except (TypeError, ValueError):
             return 0

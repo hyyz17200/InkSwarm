@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+from typing import Any, TypedDict, cast
 import json
 import threading
 import time
@@ -19,6 +20,12 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 PDF_RENDER_LOCKS: dict[str, threading.Lock] = {}
 PDF_RENDER_LOCKS_GUARD = threading.Lock()
+
+
+class PageRenderInfo(TypedDict):
+    file: str
+    width_mm: float
+    height_mm: float
 
 
 class Renderer:
@@ -72,8 +79,8 @@ class Renderer:
         meta_file.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
         return RenderArtifact(cache_dir=cache_dir, page_paths=[cache_dir / p["file"] for p in page_info], metadata=metadata)
 
-    def _render_pdf(self, pdf_path: Path, cache_dir: Path, worker: WorkerConfig, preset: PresetConfig) -> list[dict[str, float | str]]:
-        page_info: list[dict[str, float | str]] = []
+    def _render_pdf(self, pdf_path: Path, cache_dir: Path, worker: WorkerConfig, preset: PresetConfig) -> list[PageRenderInfo]:
+        page_info: list[PageRenderInfo] = []
         effective_dpi = self._effective_rip_dpi(preset.dpi)
         scale = effective_dpi / PDF_POINTS_PER_INCH
         lock = self._get_pdf_render_lock(pdf_path)
@@ -90,7 +97,7 @@ class Renderer:
                         f"render pdf worker={worker.name} preset={preset.name} page={index + 1} effective_dpi={effective_dpi} "
                         f"size_mm={width_mm:.3f}x{height_mm:.3f}"
                     )
-                    bitmap = page.render(scale=scale, optimize_mode="print")
+                    bitmap = page.render(scale=cast(Any, scale), optimize_mode="print")
                     image = bitmap.to_pil()
                     image = self._apply_color_transform(image, worker, preset)
                     image, width_mm, height_mm = self._apply_orientation(image, width_mm, height_mm)
@@ -109,7 +116,7 @@ class Renderer:
                 document.close()
         return page_info
 
-    def _render_image_file(self, image_path: Path, cache_dir: Path, worker: WorkerConfig, preset: PresetConfig) -> list[dict[str, float | str]]:
+    def _render_image_file(self, image_path: Path, cache_dir: Path, worker: WorkerConfig, preset: PresetConfig) -> list[PageRenderInfo]:
         with Image.open(image_path) as image:
             dpi_x, dpi_y = get_image_dpi(image)
             width_mm = image.width / dpi_x * MM_PER_INCH
@@ -220,11 +227,13 @@ class Renderer:
         else:
             src_profile = ImageCms.createProfile("sRGB")
 
-        intent = INTENT_NAME_TO_PIL.get(preset.rendering_intent, 1)
-        flags = 0
-        bpc_flag = getattr(getattr(ImageCms, "Flags", object()), "BLACKPOINTCOMPENSATION", 0)
+        intent_type = getattr(ImageCms, "Intent", int)
+        intent = cast(Any, intent_type(INTENT_NAME_TO_PIL.get(preset.rendering_intent, 1)))
+        flags_type = getattr(ImageCms, "Flags", int)
+        flags = cast(Any, flags_type(0))
+        bpc_flag = getattr(flags_type, "BLACKPOINTCOMPENSATION", 0)
         if preset.black_point_compensation and bpc_flag:
-            flags |= int(bpc_flag)
+            flags |= cast(Any, bpc_flag)
 
         working_image = image.convert("CMYK" if source_mode == "CMYK" else "RGB")
         if not output_profile_path:
@@ -242,6 +251,8 @@ class Renderer:
             outputMode=output_mode,
             flags=flags,
         )
+        if rendered is None:
+            raise RuntimeError("ICC color transform failed")
         rendered.info.pop("icc_profile", None)
         debug_log(f"color transform end worker={worker.name} preset={preset.name} output_mode=RGB")
         return rendered.convert("RGB")

@@ -160,8 +160,8 @@ class MainWindow(QMainWindow):
     def _add_section_header(self, layout: QVBoxLayout, title: str) -> None:
         layout.addWidget(QLabel(title))
         line = QFrame()
-        line.setFrameShape(QFrame.HLine)
-        line.setFrameShadow(QFrame.Sunken)
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(line)
 
     def _build_ui(self) -> None:
@@ -172,7 +172,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        self.main_splitter = QSplitter(Qt.Vertical)
+        self.main_splitter = QSplitter(Qt.Orientation.Vertical)
 
         top = QFrame()
         top.setObjectName("sectionPanel")
@@ -181,21 +181,21 @@ class MainWindow(QMainWindow):
         top_layout.setSpacing(6)
         self._add_section_header(top_layout, "任务列表（支持拖放 PDF / 图片）")
 
-        self.top_splitter = QSplitter(Qt.Horizontal)
+        self.top_splitter = QSplitter(Qt.Orientation.Horizontal)
 
         self.task_table = FileDropTable(self.add_files)
         self.task_table.setColumnCount(6)
         self.task_table.setHorizontalHeaderLabels(["启用", "文件", "份数", "打印尺寸", "状态", "分配"])
-        self.task_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.task_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.task_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.task_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.task_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.task_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.task_table.setAlternatingRowColors(True)
-        self.task_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
-        self.task_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.task_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
-        self.task_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
-        self.task_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Fixed)
-        self.task_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.task_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.task_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.task_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.task_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.task_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self.task_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.task_table.setColumnWidth(0, 56)
         self.task_table.setColumnWidth(2, 88)
         self.task_table.setColumnWidth(3, 160)
@@ -205,15 +205,15 @@ class MainWindow(QMainWindow):
 
         preview_panel = QWidget()
         preview_panel.setMinimumHeight(0)
-        preview_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
+        preview_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
         preview_layout = QVBoxLayout(preview_panel)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(0)
         self.preview_label = QLabel()
         self.preview_label.setMinimumWidth(240)
         self.preview_label.setMinimumHeight(0)
-        self.preview_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setScaledContents(False)
         self.preview_label.setStyleSheet("border: 1px solid palette(mid); background: palette(base);")
         preview_layout.addWidget(self.preview_label, 1)
@@ -235,7 +235,7 @@ class MainWindow(QMainWindow):
         self.task_copies_value_box = QSpinBox()
         self.task_copies_value_box.setRange(1, 9999)
         self.task_copies_value_box.setValue(self._task_default_copies())
-        self.task_copies_value_box.setAlignment(Qt.AlignCenter)
+        self.task_copies_value_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.task_copies_value_box.setFixedWidth(88)
         self.task_copies_value_box.valueChanged.connect(self.on_task_default_copies_changed)
         for btn in [btn_add, btn_remove, btn_clear, btn_copies]:
@@ -244,7 +244,7 @@ class MainWindow(QMainWindow):
         task_buttons.addStretch(1)
         top_layout.addLayout(task_buttons)
 
-        self.bottom_splitter = QSplitter(Qt.Vertical)
+        self.bottom_splitter = QSplitter(Qt.Orientation.Vertical)
 
         worker_panel = QFrame()
         worker_panel.setObjectName("sectionPanel")
@@ -264,16 +264,16 @@ class MainWindow(QMainWindow):
         self.worker_table = QTableWidget()
         self.worker_table.setColumnCount(6)
         self.worker_table.setHorizontalHeaderLabels(["启用", "Worker", "打印机", "预设", "速度", "状态"])
-        self.worker_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.worker_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.worker_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.worker_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.worker_table.setAlternatingRowColors(True)
         header = self.worker_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Fixed)
-        header.setSectionResizeMode(1, QHeaderView.Fixed)
-        header.setSectionResizeMode(2, QHeaderView.Fixed)
-        header.setSectionResizeMode(3, QHeaderView.Fixed)
-        header.setSectionResizeMode(4, QHeaderView.Fixed)
-        header.setSectionResizeMode(5, QHeaderView.Stretch)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.worker_table.setColumnWidth(0, 56)
         self.worker_table.setColumnWidth(1, 150)
         self.worker_table.setColumnWidth(2, 150)
@@ -306,7 +306,7 @@ class MainWindow(QMainWindow):
         controls_panel = QFrame()
         controls_panel.setObjectName("workerControlPanel")
         controls_panel.setMinimumWidth(180)
-        controls_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        controls_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         controls_layout = QVBoxLayout(controls_panel)
         controls_layout.setContentsMargins(10, 10, 10, 10)
         controls_layout.setSpacing(10)
@@ -315,14 +315,14 @@ class MainWindow(QMainWindow):
         self.start_button.clicked.connect(self.start_or_toggle_pause)
         self.start_button.setObjectName("primaryActionButton")
         self.start_button.setMinimumHeight(96)
-        self.start_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.start_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self.stop_button = QPushButton("停止")
         self.stop_button.clicked.connect(self.stop_run)
         self.stop_button.setObjectName("dangerActionButton")
         self.stop_button.setEnabled(False)
         self.stop_button.setMinimumHeight(96)
-        self.stop_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.stop_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         controls_layout.addWidget(self.start_button)
         controls_layout.addWidget(self.stop_button)
@@ -357,8 +357,8 @@ class MainWindow(QMainWindow):
         log_layout.addLayout(log_header)
 
         line = QFrame()
-        line.setFrameShape(QFrame.HLine)
-        line.setFrameShadow(QFrame.Sunken)
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
         log_layout.addWidget(line)
 
         self.log_stack = QStackedWidget()
@@ -383,16 +383,16 @@ class MainWindow(QMainWindow):
             statistics_table = QTableWidget()
             statistics_table.setColumnCount(len(CSV_HEADER))
             statistics_table.setHorizontalHeaderLabels(CSV_HEADER)
-            statistics_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-            statistics_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-            statistics_table.setSelectionMode(QAbstractItemView.SingleSelection)
+            statistics_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            statistics_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            statistics_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
             statistics_table.setAlternatingRowColors(True)
             statistics_table.setWordWrap(False)
             statistics_header = statistics_table.horizontalHeader()
             for column in range(len(CSV_HEADER)):
-                statistics_header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+                statistics_header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
             if len(CSV_HEADER) > 2:
-                statistics_header.setSectionResizeMode(2, QHeaderView.Stretch)
+                statistics_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
             statistics_layout.addWidget(statistics_status_label)
             statistics_layout.addWidget(statistics_table, 1)
             self.statistics_status_labels[statistics_key] = statistics_status_label
@@ -447,7 +447,7 @@ class MainWindow(QMainWindow):
 
         layout = QVBoxLayout(dialog)
         form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         autoclear_checkbox = QCheckBox("启动时自动清理上次缓存")
         autoclear_checkbox.setChecked(bool(self.app_settings.get("auto_clear_cache_on_start", False)))
@@ -535,12 +535,12 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(form)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
 
-        if dialog.exec() != QDialog.Accepted:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
         new_autoclear = bool(autoclear_checkbox.isChecked())
@@ -590,7 +590,7 @@ class MainWindow(QMainWindow):
                 icon = QIcon(str(icon_path))
                 self.setWindowIcon(icon)
                 app = QApplication.instance()
-                if app is not None:
+                if isinstance(app, QApplication):
                     app.setWindowIcon(icon)
                 break
 
@@ -601,9 +601,9 @@ class MainWindow(QMainWindow):
         if point_size <= 0:
             point_size = 9.0
         font.setPointSizeF(point_size)
-        font.setStyleStrategy(QFont.PreferAntialias)
+        font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
         try:
-            font.setHintingPreference(QFont.PreferFullHinting)
+            font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
         except Exception:
             pass
         return font
@@ -661,7 +661,7 @@ class MainWindow(QMainWindow):
 
     def apply_ui_scale(self, scale: int) -> None:
         app = QApplication.instance()
-        if app is not None:
+        if isinstance(app, QApplication):
             base_font = self._base_font()
             scaled_font = QFont(base_font)
             scaled_font.setPointSizeF(max(7.5, base_font.pointSizeF() * scale / 100.0))
@@ -785,29 +785,29 @@ class MainWindow(QMainWindow):
             self.task_table.setCellWidget(row, 0, self._centered_widget(enabled_box))
 
             file_item = QTableWidgetItem(task.file_name())
-            file_item.setData(Qt.UserRole, task.task_id)
-            file_item.setFlags(file_item.flags() & ~Qt.ItemIsEditable)
+            file_item.setData(Qt.ItemDataRole.UserRole, task.task_id)
+            file_item.setFlags(file_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.task_table.setItem(row, 1, file_item)
 
             copies_box = QSpinBox()
             copies_box.setRange(1, 9999)
-            copies_box.setAlignment(Qt.AlignCenter)
+            copies_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
             copies_box.setValue(task.copies)
             copies_box.valueChanged.connect(lambda value, task_id=task.task_id: self.on_task_copies_changed(task_id, value))
             self.task_table.setCellWidget(row, 2, copies_box)
 
             size_item = QTableWidgetItem(task.display_size_mm)
-            size_item.setTextAlignment(Qt.AlignCenter)
-            size_item.setFlags(size_item.flags() & ~Qt.ItemIsEditable)
+            size_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            size_item.setFlags(size_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.task_table.setItem(row, 3, size_item)
 
             status_item = QTableWidgetItem(task.status)
-            status_item.setTextAlignment(Qt.AlignCenter)
-            status_item.setFlags(status_item.flags() & ~Qt.ItemIsEditable)
+            status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            status_item.setFlags(status_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.task_table.setItem(row, 4, status_item)
 
             assigned_item = QTableWidgetItem(task.assigned_summary)
-            assigned_item.setFlags(assigned_item.flags() & ~Qt.ItemIsEditable)
+            assigned_item.setFlags(assigned_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.task_table.setItem(row, 5, assigned_item)
 
         self.update_task_preview()
@@ -854,7 +854,7 @@ class MainWindow(QMainWindow):
         wrapper = QWidget()
         layout = QHBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setAlignment(Qt.AlignCenter)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(child)
         return wrapper
 
@@ -870,7 +870,7 @@ class MainWindow(QMainWindow):
             self.worker_table.setCellWidget(row, 0, self._centered_widget(enabled_box))
 
             name_item = QTableWidgetItem(worker.name)
-            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.worker_table.setItem(row, 1, name_item)
 
             printer_item = QTableWidgetItem(worker.printer_name)
@@ -887,13 +887,13 @@ class MainWindow(QMainWindow):
 
             weight_box = QSpinBox()
             weight_box.setRange(1, 100)
-            weight_box.setAlignment(Qt.AlignCenter)
+            weight_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
             weight_box.setValue(worker.weight)
             self.worker_table.setCellWidget(row, 4, weight_box)
 
             status_item = QTableWidgetItem("Idle")
-            status_item.setTextAlignment(Qt.AlignCenter)
-            status_item.setFlags(status_item.flags() & ~Qt.ItemIsEditable)
+            status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            status_item.setFlags(status_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.worker_table.setItem(row, 5, status_item)
 
         self.on_log_text(f"已加载方案组 {self.current_worker_group}，共 {len(self.workers)} 个 Worker。")
@@ -907,8 +907,8 @@ class MainWindow(QMainWindow):
             worker.enabled = bool(enabled_box.isChecked()) if enabled_box is not None else worker.enabled
             printer_item = self.worker_table.item(row, 2)
             worker.printer_name = printer_item.text().strip() if printer_item is not None else worker.printer_name
-            worker.active_preset = preset_combo.currentText() if preset_combo is not None else worker.active_preset
-            worker.weight = int(weight_box.value()) if weight_box is not None else worker.weight
+            worker.active_preset = preset_combo.currentText() if isinstance(preset_combo, QComboBox) else worker.active_preset
+            worker.weight = int(weight_box.value()) if isinstance(weight_box, QSpinBox) else worker.weight
         self.worker_service.save_workers(self.workers)
         self.on_log_text("Worker配置已保存。")
 
@@ -1007,7 +1007,7 @@ class MainWindow(QMainWindow):
             return
 
         dialog = QMessageBox(self)
-        dialog.setIcon(QMessageBox.Warning)
+        dialog.setIcon(QMessageBox.Icon.Warning)
         dialog.setWindowTitle("重启打印队列")
         dialog.setText("此操作会暂停 InkSwarm，并重启 Windows Print Spooler。")
         dialog.setInformativeText(
@@ -1015,8 +1015,8 @@ class MainWindow(QMainWindow):
             "重启过程中所有打印机都可能短暂不可用。\n\n"
             "此操作需要管理员权限。主窗口可以保持普通权限运行，InkSwarm 会在需要时临时请求管理员权限。"
         )
-        restart_button = dialog.addButton("确认重启", QMessageBox.AcceptRole)
-        cancel_button = dialog.addButton("取消", QMessageBox.RejectRole)
+        restart_button = dialog.addButton("确认重启", QMessageBox.ButtonRole.AcceptRole)
+        cancel_button = dialog.addButton("取消", QMessageBox.ButtonRole.RejectRole)
         dialog.setDefaultButton(cancel_button)
         dialog.setEscapeButton(cancel_button)
         dialog.exec()
@@ -1173,9 +1173,9 @@ class MainWindow(QMainWindow):
         for row_index, row in enumerate(rows):
             for column_index, value in enumerate(row):
                 item = QTableWidgetItem(str(value))
-                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 if column_index in {0, 1, 3, 4, 5, 6}:
-                    item.setTextAlignment(Qt.AlignCenter)
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 table.setItem(row_index, column_index, item)
 
     def _statistics_status_text(
@@ -1287,8 +1287,8 @@ class MainWindow(QMainWindow):
             return
         scaled = self.current_preview_pixmap.scaled(
             self.preview_label.size(),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
         )
         self.preview_label.setPixmap(scaled)
 
@@ -1353,7 +1353,7 @@ def _qt_platform_arg_from_settings(root_dir: Path) -> str | None:
 
 
 def _prepare_qt_runtime() -> None:
-    QApplication.setAttribute(Qt.AA_Use96Dpi, True)
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_Use96Dpi, True)
     try:
         QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     except Exception:

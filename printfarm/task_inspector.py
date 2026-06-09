@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Iterable
+from typing import Any, cast
 
 import pypdfium2 as pdfium
 from PIL import Image, ImageCms, ImageFile
@@ -46,7 +46,9 @@ def _inspect_pdf(file_path: Path, preview_max_size: tuple[int, int]) -> TaskInsp
         width_mm = width_pt * MM_PER_INCH / PDF_POINTS_PER_INCH
         height_mm = height_pt * MM_PER_INCH / PDF_POINTS_PER_INCH
         display = _format_mm(width_mm, height_mm, len(document))
-        bitmap = first_page.render(scale=min(preview_max_size) / max(width_pt, height_pt), optimize_mode="lcd")
+        preview_scale = min(preview_max_size) / max(width_pt, height_pt)
+        # pypdfium2 accepts a float scale, but Pylance infers int from the default value.
+        bitmap = first_page.render(scale=cast(Any, preview_scale), optimize_mode="lcd")
         image = bitmap.to_pil().convert("RGB")
         preview = _image_to_png_bytes(image, preview_max_size)
         return TaskInspection(display_size_mm=display, preview_bytes=preview, page_count=len(document))

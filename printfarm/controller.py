@@ -157,6 +157,7 @@ class WorkerRuntime(threading.Thread):
         self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, f"Printing {batch.task.file_name()} ×{batch.copies}"))
         debug_log(f"worker batch start worker={self.worker.name} printer={batch.printer_name} preset={preset.name} task={batch.task.file_name()} copies={batch.copies}")
         assert self.spooler is not None
+        spooler = self.spooler
         restore_file = self.worker.resolve_path(preset.printui_restore_file) if preset.printui_restore_file else None
 
         def before_each_copy(current_copy: int, total_copies: int) -> bool | None:
@@ -165,7 +166,7 @@ class WorkerRuntime(threading.Thread):
             if not self._wait_for_resume(f"Paused {batch.task.file_name()}"):
                 raise RuntimeError("已停止")
             if self.run_options.worker_queue_limit_enabled and self.run_options.worker_queue_limit > 0:
-                self.spooler.wait_until_queue_available(
+                spooler.wait_until_queue_available(
                     printer_name=batch.printer_name,
                     max_queue_jobs=self.run_options.worker_queue_limit,
                     poll_seconds=self.run_options.queue_poll_seconds,
@@ -203,7 +204,7 @@ class WorkerRuntime(threading.Thread):
             if restore_file:
                 self.signals.log.emit(LogMessage("info", f"{self.worker.name}: 恢复驱动预设 {restore_file.name}"))
                 self._run_spool_send(lambda: restore_printer_settings(self.worker.printer_name, restore_file))
-            self.spooler.print_cached_pages(
+            spooler.print_cached_pages(
                 printer_name=batch.printer_name,
                 page_paths=artifact.page_paths,
                 page_specs=artifact.metadata.get("pages", []),
