@@ -57,7 +57,7 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.2.6"
+APP_VERSION = "0.2.7"
 DEBUG_LOG_NAME = "debug.log"
 DEFAULT_WINDOW_WIDTH = 1450
 DEFAULT_WINDOW_HEIGHT = 940
@@ -158,6 +158,7 @@ class MainWindow(QMainWindow):
         self.log_writer = LocalLogWriter(self.store.paths.logs_dir)
         self.regular_log_filter = RegularLogFilter()
         self.statistics_report_reader = MonthlyStatisticsWriter(self.store.paths.statistics_dir)
+        self._statistics_loaded_signatures: dict[str, tuple[str, bool, int, int]] = {}
         self.debug_log_path = (self.store.paths.logs_dir / DEBUG_LOG_NAME).resolve()
         debug_log(f"mainwindow init root_dir={self.root_dir}")
         self.app_settings = self.store.load_app_settings()
@@ -1351,13 +1352,16 @@ class MainWindow(QMainWindow):
             return ("previous_month", f"{previous_month}.csv", previous_month)
         return None
 
-    def refresh_statistics_table(self) -> None:
+    def refresh_statistics_table(self, force: bool = False) -> None:
         context = self._statistics_card_context()
         if context is None:
             return
         statistics_key, display_label, month = context
         status_label = self.statistics_status_labels[statistics_key]
         table = self.statistics_tables[statistics_key]
+        signature = self._statistics_report_signature(statistics_key, display_label, month)
+        if not force and self._statistics_loaded_signatures.get(statistics_key) == signature:
+            return
         try:
             if statistics_key == "today":
                 report = self.statistics_report_reader.read_daily_report(display_label)
@@ -1370,6 +1374,11 @@ class MainWindow(QMainWindow):
             return
 
         self._populate_statistics_table(table, report.header, report.rows)
+        self._statistics_loaded_signatures[statistics_key] = self._statistics_report_signature(
+            statistics_key,
+            display_label,
+            month,
+        )
         status_label.setText(
             self._statistics_status_text(
                 statistics_key,
@@ -1380,21 +1389,40 @@ class MainWindow(QMainWindow):
             )
         )
 
+    def _statistics_report_signature(self, statistics_key: str, display_label: str, month: str | None) -> tuple[str, bool, int, int]:
+        if statistics_key == "today":
+            csv_path = self.store.paths.statistics_dir / f"{display_label[:7]}.csv"
+        else:
+            csv_path = self.store.paths.statistics_dir / f"{month}.csv"
+        try:
+            stat = csv_path.stat()
+        except FileNotFoundError:
+            return (display_label, False, 0, 0)
+        return (display_label, True, int(stat.st_mtime_ns), int(stat.st_size))
+
     def _populate_statistics_table(self, table: QTableWidget, header: tuple[str, ...], rows: tuple[tuple[str, ...], ...]) -> None:
         display_columns = self._statistics_display_columns(header)
         display_header = tuple(header[column] for column in display_columns)
-        table.setSortingEnabled(False)
-        table.setColumnCount(len(display_header))
-        table.setHorizontalHeaderLabels(list(display_header))
-        table.setRowCount(len(rows))
-        for row_index, row in enumerate(rows):
-            for display_index, source_index in enumerate(display_columns):
-                value = row[source_index] if source_index < len(row) else ""
-                item = QTableWidgetItem(str(value))
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                if source_index in {0, 1, 3, 4, 5, 6}:
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                table.setItem(row_index, display_index, item)
+        previous_signal_state = table.blockSignals(True)
+        table.setUpdatesEnabled(False)
+        try:
+            table.setSortingEnabled(False)
+            table.clearContents()
+            table.setColumnCount(len(display_header))
+            table.setHorizontalHeaderLabels(list(display_header))
+            table.setRowCount(len(rows))
+            for row_index, row in enumerate(rows):
+                for display_index, source_index in enumerate(display_columns):
+                    value = row[source_index] if source_index < len(row) else ""
+                    item = QTableWidgetItem(str(value))
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    if source_index in {0, 1, 3, 4, 5, 6}:
+                        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    table.setItem(row_index, display_index, item)
+        finally:
+            table.setUpdatesEnabled(True)
+            table.blockSignals(previous_signal_state)
+            table.viewport().update()
 
     @staticmethod
     def _statistics_display_columns(header: list[str] | tuple[str, ...]) -> tuple[int, ...]:
@@ -1483,7 +1511,7 @@ class MainWindow(QMainWindow):
         self.refresh_task_table()
         self.on_log_text("流程已启动。" if running else "流程已结束。")
         if not running and self._statistics_card_context() is not None:
-            self.refresh_statistics_table()
+            self.refresh_statistics_table(force=True)
 
     def on_pause_state_changed(self, paused: bool) -> None:
         if not self.controller.is_running():
