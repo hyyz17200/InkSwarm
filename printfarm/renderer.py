@@ -20,6 +20,7 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 PDF_RENDER_LOCKS: dict[str, threading.Lock] = {}
 PDF_RENDER_LOCKS_GUARD = threading.Lock()
+IMAGE_RIP_PRESHRINK_FACTOR = 2.0
 
 
 class PageRenderInfo(TypedDict):
@@ -47,6 +48,7 @@ class Renderer:
             "target_orientation": self.target_orientation,
             "rip_limit_enabled": self.rip_limit_enabled,
             "rip_limit_ppi": self.rip_limit_ppi,
+            "image_rip_preshrink_factor": IMAGE_RIP_PRESHRINK_FACTOR,
         }
         key = stable_hash(key_payload)
         cache_dir = self.cache_root / key
@@ -74,6 +76,7 @@ class Renderer:
             "rip_limit_ppi": self.rip_limit_ppi,
             "auto_orient_enabled": self.auto_orient_enabled,
             "target_orientation": self.target_orientation,
+            "image_rip_preshrink_factor": IMAGE_RIP_PRESHRINK_FACTOR,
             "pages": page_info,
         }
         meta_file.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -121,6 +124,7 @@ class Renderer:
             dpi_x, dpi_y = get_image_dpi(image)
             width_mm = image.width / dpi_x * MM_PER_INCH
             height_mm = image.height / dpi_y * MM_PER_INCH
+            image = self._pre_shrink_for_rip_limit(image, width_mm, height_mm, image_path, worker)
             rendered = self._apply_color_transform(image, worker, preset)
             rendered, width_mm, height_mm = self._apply_orientation(rendered, width_mm, height_mm)
             rendered = self._apply_rip_limit_to_image(rendered, width_mm, height_mm, image_path, worker)
@@ -138,6 +142,11 @@ class Renderer:
         if not self.rip_limit_enabled:
             return requested
         return max(36, min(requested, self.rip_limit_ppi))
+
+    def _rip_limit_size(self, width_mm: float, height_mm: float) -> tuple[int, int]:
+        max_w = max(1, round(width_mm / MM_PER_INCH * self.rip_limit_ppi))
+        max_h = max(1, round(height_mm / MM_PER_INCH * self.rip_limit_ppi))
+        return max_w, max_h
 
     def _get_pdf_render_lock(self, pdf_path: Path) -> threading.Lock:
         key = str(pdf_path.resolve()).lower()
@@ -165,14 +174,40 @@ class Renderer:
     def _apply_rip_limit_to_image(self, image: Image.Image, width_mm: float, height_mm: float, source_path: Path, worker: WorkerConfig) -> Image.Image:
         if not self.rip_limit_enabled:
             return image
-        max_w = max(1, round(width_mm / 25.4 * self.rip_limit_ppi))
-        max_h = max(1, round(height_mm / 25.4 * self.rip_limit_ppi))
+        max_w, max_h = self._rip_limit_size(width_mm, height_mm)
         if image.width <= max_w and image.height <= max_h:
             return image
         debug_log(
             f"rip downscale worker={worker.name} source={source_path.name} from={image.width}x{image.height} to={max_w}x{max_h} limit_ppi={self.rip_limit_ppi}"
         )
         return image.resize((max_w, max_h), Image.Resampling.BICUBIC)
+
+    def _pre_shrink_for_rip_limit(self, image: Image.Image, width_mm: float, height_mm: float, source_path: Path, worker: WorkerConfig) -> Image.Image:
+        if not self.rip_limit_enabled:
+            return image
+        max_w, max_h = self._rip_limit_size(width_mm, height_mm)
+        preshrink_w = max(1, round(max_w * IMAGE_RIP_PRESHRINK_FACTOR))
+        preshrink_h = max(1, round(max_h * IMAGE_RIP_PRESHRINK_FACTOR))
+        if image.width <= preshrink_w and image.height <= preshrink_h:
+            return image
+        scale = min(
+            preshrink_w / max(1, image.width),
+            preshrink_h / max(1, image.height),
+            1.0,
+        )
+        if scale >= 1.0:
+            return image
+        new_size = (
+            max(1, round(image.width * scale)),
+            max(1, round(image.height * scale)),
+        )
+        debug_log(
+            f"rip preshrink worker={worker.name} source={source_path.name} from={image.width}x{image.height} "
+            f"to={new_size[0]}x{new_size[1]} factor={IMAGE_RIP_PRESHRINK_FACTOR:g} limit_ppi={self.rip_limit_ppi}"
+        )
+        shrunk = image.resize(new_size, Image.Resampling.BICUBIC)
+        shrunk.info.update(image.info)
+        return shrunk
 
     def _apply_orientation(self, image: Image.Image, width_mm: float, height_mm: float) -> tuple[Image.Image, float, float]:
         if not self.auto_orient_enabled:
