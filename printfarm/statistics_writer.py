@@ -340,7 +340,16 @@ class MonthlyStatisticsWriter:
         return rows
 
     def _upsert_csv_rows(self, payload: dict, new_rows: list[list[str]]) -> None:
-        target = self._target_for_payload(payload)
+        rows_by_target: dict[Path, list[list[str]]] = {}
+        for row in new_rows:
+            row = self._pad_csv_row(row)
+            target = self._target_for_row(payload, row)
+            rows_by_target.setdefault(target, []).append(row)
+
+        for target in sorted(rows_by_target, key=lambda item: str(item)):
+            self._upsert_target_csv_rows(target, rows_by_target[target])
+
+    def _upsert_target_csv_rows(self, target: Path, new_rows: list[list[str]]) -> None:
         current_rows = self._read_csv_rows(target)
         data_rows = self._normalize_csv_rows(current_rows)
         index: dict[tuple[str, str], int] = {}
@@ -356,7 +365,6 @@ class MonthlyStatisticsWriter:
             else:
                 deduped.append(row)
         for row in new_rows:
-            row = self._pad_csv_row(row)
             key = (row[7], row[8])
             if key in index:
                 deduped[index[key]] = row
@@ -364,6 +372,19 @@ class MonthlyStatisticsWriter:
                 index[key] = len(deduped)
                 deduped.append(row)
         self._write_csv_rows(target, [CSV_HEADER] + deduped)
+
+    def _target_for_row(self, payload: dict, row: list[str]) -> Path:
+        month = self._month_from_row(row)
+        if month is None:
+            return self._target_for_payload(payload)
+        return self.statistics_dir / f"{month}.csv"
+
+    @staticmethod
+    def _month_from_row(row: list[str]) -> str | None:
+        if not row:
+            return None
+        match = re.match(r"^(\d{4}-\d{2})-\d{2}(?:\s|$)", str(row[0]).strip())
+        return match.group(1) if match else None
 
     def _target_for_payload(self, payload: dict) -> Path:
         started_at_ts = float(payload.get("started_at_ts", time.time()))

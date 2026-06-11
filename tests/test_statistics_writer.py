@@ -98,6 +98,94 @@ class MonthlyStatisticsWriterTests(TestCase):
             self.assertEqual(rows[0]["任务ID"], "task-a")
             self.assertEqual(rows[0]["成功张数"], "4")
 
+    def test_cross_month_task_is_written_to_task_start_month(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            writer = MonthlyStatisticsWriter(root)
+            run_started_at = ts(2026, 6, 30, 23, 58)
+            task_started_at = ts(2026, 7, 1, 0, 3)
+            last_success_at = ts(2026, 7, 1, 0, 8)
+
+            writer.begin_run("run-cross", run_started_at, [StatisticsTaskRecord("task-a", "july.pdf", 3)])
+            writer.mark_task_started("run-cross", "task-a", "july.pdf", 3, task_started_at)
+            writer.record_success("run-cross", "task-a", "july.pdf", 3, copies_done=3, success_at_ts=last_success_at)
+            result = writer.finish_run("run-cross", last_success_at + 10)
+
+            self.assertTrue(result.ok)
+            self.assertFalse((root / "2026-06.csv").exists())
+            rows = read_dict_rows(root, "2026-07")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0][CSV_HEADER[0]], fmt(task_started_at))
+            self.assertEqual(rows[0][CSV_HEADER[1]], fmt(last_success_at))
+            self.assertEqual(rows[0][CSV_HEADER[2]], "july.pdf")
+            self.assertEqual(rows[0][CSV_HEADER[4]], "3")
+
+            daily_report = writer.read_daily_report("2026-07-01")
+            self.assertEqual(len(daily_report.rows), 1)
+            self.assertEqual(daily_report.total_success_copies, 3)
+
+    def test_single_run_can_split_task_rows_across_month_csvs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            writer = MonthlyStatisticsWriter(root)
+            run_started_at = ts(2026, 6, 30, 23, 58)
+            june_task_started = ts(2026, 6, 30, 23, 59)
+            july_task_started = ts(2026, 7, 1, 0, 1)
+
+            writer.begin_run(
+                "run-split",
+                run_started_at,
+                [
+                    StatisticsTaskRecord("task-june", "june.pdf", 1),
+                    StatisticsTaskRecord("task-july", "july.pdf", 2),
+                ],
+            )
+            writer.mark_task_started("run-split", "task-june", "june.pdf", 1, june_task_started)
+            writer.record_success("run-split", "task-june", "june.pdf", 1, copies_done=1, success_at_ts=june_task_started + 30)
+            writer.mark_task_started("run-split", "task-july", "july.pdf", 2, july_task_started)
+            writer.record_success("run-split", "task-july", "july.pdf", 2, copies_done=2, success_at_ts=july_task_started + 30)
+            result = writer.finish_run("run-split", july_task_started + 60)
+
+            self.assertTrue(result.ok)
+            june_rows = read_dict_rows(root, "2026-06")
+            july_rows = read_dict_rows(root, "2026-07")
+            self.assertEqual(len(june_rows), 1)
+            self.assertEqual(len(july_rows), 1)
+            self.assertEqual(june_rows[0][CSV_HEADER[2]], "june.pdf")
+            self.assertEqual(june_rows[0][CSV_HEADER[8]], "task-june")
+            self.assertEqual(july_rows[0][CSV_HEADER[2]], "july.pdf")
+            self.assertEqual(july_rows[0][CSV_HEADER[8]], "task-july")
+
+    def test_cross_month_locked_csv_keeps_pending_and_retries_without_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            writer = MonthlyStatisticsWriter(root)
+            run_started_at = ts(2026, 6, 30, 23, 58)
+            task_started_at = ts(2026, 7, 1, 0, 3)
+
+            writer.begin_run("run-cross-locked", run_started_at, [StatisticsTaskRecord("task-a", "locked-july.pdf", 4)])
+            writer.mark_task_started("run-cross-locked", "task-a", "locked-july.pdf", 4, task_started_at)
+            writer.record_success("run-cross-locked", "task-a", "locked-july.pdf", 4, copies_done=4, success_at_ts=task_started_at + 30)
+
+            with patch.object(writer, "_write_csv_rows", side_effect=PermissionError("locked by Excel")):
+                result = writer.finish_run("run-cross-locked", task_started_at + 60)
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.pending_runs, 1)
+            self.assertFalse((root / "2026-06.csv").exists())
+            self.assertFalse((root / "2026-07.csv").exists())
+
+            retry = writer.flush_pending_runs()
+            retry_again = writer.flush_pending_runs()
+
+            self.assertTrue(retry.ok)
+            self.assertTrue(retry_again.ok)
+            rows = read_dict_rows(root, "2026-07")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0][CSV_HEADER[7]], "run-cross-locked")
+            self.assertEqual(rows[0][CSV_HEADER[8]], "task-a")
+            self.assertEqual(rows[0][CSV_HEADER[4]], "4")
+
     def test_legacy_three_column_csv_is_migrated_when_new_row_is_written(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
