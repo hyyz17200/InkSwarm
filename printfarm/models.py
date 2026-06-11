@@ -197,6 +197,7 @@ class RunOptions:
     tail_balance_idle_seconds: int = 15
     rip_limit_enabled: bool = True
     rip_limit_ppi: int = DEFAULT_RASTER_DPI
+    printer_defaults_check_enabled: bool = True
 
 
 @dataclass

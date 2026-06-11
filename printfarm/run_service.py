@@ -39,6 +39,7 @@ class RunService:
             tail_balance_idle_seconds=max(1, int(settings.get("tail_balance_idle_seconds", 15) or 15)),
             rip_limit_enabled=bool(settings.get("rip_limit_enabled", True)),
             rip_limit_ppi=int(settings.get("rip_limit_ppi", 300) or 300),
+            printer_defaults_check_enabled=bool(settings.get("printer_defaults_check_enabled", True)),
         )
 
     @staticmethod

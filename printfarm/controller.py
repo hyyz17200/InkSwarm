@@ -203,7 +203,13 @@ class WorkerRuntime(threading.Thread):
                 raise RuntimeError("已停止")
             if restore_file:
                 self.signals.log.emit(LogMessage("info", f"{self.worker.name}: 恢复驱动预设 {restore_file.name}"))
-                self._run_spool_send(lambda: restore_printer_settings(self.worker.printer_name, restore_file))
+                self._run_spool_send(
+                    lambda: restore_printer_settings(
+                        self.worker.printer_name,
+                        restore_file,
+                        initialize_defaults=self.run_options.printer_defaults_check_enabled,
+                    )
+                )
             spooler.print_cached_pages(
                 printer_name=batch.printer_name,
                 page_paths=artifact.page_paths,

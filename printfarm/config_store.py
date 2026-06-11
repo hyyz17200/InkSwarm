@@ -163,6 +163,7 @@ class ConfigStore:
             "tail_balance_idle_seconds": 15,
             "rip_limit_enabled": True,
             "rip_limit_ppi": 300,
+            "printer_defaults_check_enabled": True,
             "font_engine": "auto",
             "task_default_copies": 1,
             "window_width": 1450,

@@ -517,6 +517,10 @@ class MainWindow(QMainWindow):
         ignore_margins_checkbox.setChecked(bool(self.app_settings.get("ignore_margins", True)))
         form.addRow("忽略页边距", ignore_margins_checkbox)
 
+        printer_defaults_checkbox = QCheckBox("启用")
+        printer_defaults_checkbox.setChecked(bool(self.app_settings.get("printer_defaults_check_enabled", True)))
+        form.addRow("初始化打印默认值检查", printer_defaults_checkbox)
+
         orient_enabled_checkbox = QCheckBox("启用")
         orient_enabled_checkbox.setChecked(bool(self.app_settings.get("auto_orient_enabled", False)))
         form.addRow("自适应纸张方向", orient_enabled_checkbox)
@@ -587,6 +591,7 @@ class MainWindow(QMainWindow):
         self.app_settings["ui_scale"] = new_scale
         self.app_settings["font_engine"] = str(font_engine_combo.currentData() or "auto")
         self.app_settings["ignore_margins"] = bool(ignore_margins_checkbox.isChecked())
+        self.app_settings["printer_defaults_check_enabled"] = bool(printer_defaults_checkbox.isChecked())
         self.app_settings["auto_orient_enabled"] = bool(orient_enabled_checkbox.isChecked())
         self.app_settings["target_orientation"] = str(orientation_combo.currentData())
         self.app_settings["worker_queue_limit_enabled"] = bool(queue_limit_enabled_checkbox.isChecked())
@@ -1129,8 +1134,14 @@ class MainWindow(QMainWindow):
         self.save_worker_settings()
         return self.workers[row]
 
+    def _printer_defaults_check_enabled(self) -> bool:
+        return bool(self.app_settings.get("printer_defaults_check_enabled", True))
+
     def _restore_worker_preset_if_any(self, worker: WorkerConfig) -> None:
-        message = self.worker_service.restore_preset_if_any(worker)
+        message = self.worker_service.restore_preset_if_any(
+            worker,
+            initialize_defaults=self._printer_defaults_check_enabled(),
+        )
         if message:
             self.on_log_text(message)
 
@@ -1171,7 +1182,10 @@ class MainWindow(QMainWindow):
             return
         try:
             preset_name = worker.get_active_preset().name
-            snapshot_path = self.worker_service.capture_snapshot(worker)
+            snapshot_path = self.worker_service.capture_snapshot(
+                worker,
+                initialize_defaults=self._printer_defaults_check_enabled(),
+            )
             self.on_log_text(f"已导出 {worker.name}/{preset_name} 的驱动快照: {snapshot_path.name}")
         except Exception as exc:
             QMessageBox.critical(self, "导出失败", str(exc))

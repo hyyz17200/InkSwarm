@@ -26,11 +26,11 @@ class WorkerService:
     def save_workers(self, workers: Iterable[WorkerConfig]) -> None:
         self.store.save_workers(workers)
 
-    def restore_preset_if_any(self, worker: WorkerConfig) -> str | None:
+    def restore_preset_if_any(self, worker: WorkerConfig, initialize_defaults: bool = True) -> str | None:
         preset = worker.get_active_preset()
         snapshot_path = worker.resolve_path(preset.printui_restore_file) if preset.printui_restore_file else None
         if snapshot_path and snapshot_path.exists():
-            restore_printer_settings(worker.printer_name, snapshot_path)
+            restore_printer_settings(worker.printer_name, snapshot_path, initialize_defaults=initialize_defaults)
             return f"已载入 {worker.name}/{preset.name} 的驱动快照。"
         return None
 
@@ -42,12 +42,12 @@ class WorkerService:
     def open_properties(worker: WorkerConfig) -> None:
         open_printer_properties(worker.printer_name)
 
-    def capture_snapshot(self, worker: WorkerConfig) -> Path:
+    def capture_snapshot(self, worker: WorkerConfig, initialize_defaults: bool = True) -> Path:
         preset = worker.get_active_preset()
         snapshot_path = worker.resolve_path(preset.printui_restore_file) if preset.printui_restore_file else None
         if snapshot_path is None:
             snapshot_path = worker.directory / f"{preset.name}.dat"
             preset.printui_restore_file = snapshot_path.name
-        save_printer_settings(worker.printer_name, snapshot_path)
+        save_printer_settings(worker.printer_name, snapshot_path, initialize_defaults=initialize_defaults)
         self.store.save_worker(worker)
         return snapshot_path
