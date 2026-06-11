@@ -57,7 +57,7 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.2.8"
+APP_VERSION = "0.2.9"
 DEBUG_LOG_NAME = "debug.log"
 DEFAULT_WINDOW_WIDTH = 1450
 DEFAULT_WINDOW_HEIGHT = 940
@@ -98,8 +98,7 @@ class FileDropTable(QTableWidget):
             if not url.isLocalFile():
                 continue
             path = Path(url.toLocalFile())
-            if path.suffix.lower() in SUPPORTED_INPUT_SUFFIXES:
-                files.append(path)
+            files.append(path)
         if files:
             self.on_files_dropped(files)
             event.acceptProposedAction()

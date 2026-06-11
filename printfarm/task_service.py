@@ -36,10 +36,15 @@ class TaskService:
         existing_paths = {task.file_path.resolve() for task in tasks}
         copies = max(1, int(default_copies))
         for path in files:
-            if not path.exists() or path.suffix.lower() not in SUPPORTED_INPUT_SUFFIXES:
+            if not path.exists():
+                result.skipped.append(SkippedTaskInput(path, "文件不存在"))
+                continue
+            if path.suffix.lower() not in SUPPORTED_INPUT_SUFFIXES:
+                result.skipped.append(SkippedTaskInput(path, "不支持的文件类型"))
                 continue
             resolved = path.resolve()
             if resolved in existing_paths:
+                result.skipped.append(SkippedTaskInput(resolved, "已在任务列表中"))
                 continue
             try:
                 inspection = inspect_task_input(resolved)
@@ -68,11 +73,10 @@ class TaskService:
             if not raw_path:
                 continue
             path = Path(raw_path)
-            if path.exists() and path.suffix.lower() in SUPPORTED_INPUT_SUFFIXES:
-                resolved = path.resolve()
-                files_to_add.append(path)
-                copies_map[resolved] = max(1, int(item.get("copies", 1)))
-                enabled_map[resolved] = bool(item.get("enabled", True))
+            resolved = path.resolve()
+            files_to_add.append(path)
+            copies_map[resolved] = max(1, int(item.get("copies", 1)))
+            enabled_map[resolved] = bool(item.get("enabled", True))
 
         add_result = self.add_files(tasks, files_to_add)
         for task in tasks:
