@@ -13,6 +13,32 @@ from .printui import (
 )
 
 
+class WorkerValidationError(RuntimeError):
+    pass
+
+
+def validate_unique_worker_names(workers: Iterable[WorkerConfig]) -> None:
+    seen: dict[str, WorkerConfig] = {}
+    errors: list[str] = []
+    for worker in workers:
+        raw_name = str(worker.name or "")
+        display_name = raw_name.strip()
+        normalized_name = display_name.casefold()
+        if not normalized_name:
+            errors.append(f"Worker name cannot be empty: {worker.directory}")
+            continue
+        previous = seen.get(normalized_name)
+        if previous is not None:
+            errors.append(
+                f"Duplicate Worker name '{display_name}': {previous.directory} and {worker.directory}"
+            )
+            continue
+        seen[normalized_name] = worker
+
+    if errors:
+        raise WorkerValidationError("; ".join(errors))
+
+
 class WorkerService:
     def __init__(self, store: ConfigStore) -> None:
         self.store = store
@@ -25,6 +51,10 @@ class WorkerService:
 
     def save_workers(self, workers: Iterable[WorkerConfig]) -> None:
         self.store.save_workers(workers)
+
+    @staticmethod
+    def validate_workers(workers: Iterable[WorkerConfig]) -> None:
+        validate_unique_worker_names(workers)
 
     def restore_preset_if_any(self, worker: WorkerConfig, initialize_defaults: bool = True) -> str | None:
         preset = worker.get_active_preset()

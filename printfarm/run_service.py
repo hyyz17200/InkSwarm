@@ -5,6 +5,7 @@ from typing import Any, Iterable
 import copy
 
 from .models import RunOptions, TaskItem, WorkerConfig
+from .worker_service import validate_unique_worker_names
 
 
 @dataclass
@@ -17,6 +18,7 @@ class PreparedRun:
 
 class RunService:
     def prepare_start(self, tasks: list[TaskItem], workers: list[WorkerConfig], settings: dict[str, Any]) -> PreparedRun:
+        validate_unique_worker_names(workers)
         active_tasks = [task for task in tasks if task.enabled]
         copied_tasks = copy.deepcopy(active_tasks)
         copied_workers = copy.deepcopy(workers)

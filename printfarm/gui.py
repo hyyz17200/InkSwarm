@@ -52,7 +52,7 @@ from .run_service import RunService
 from .spooler_service import SpoolerMaintenance, SpoolerMaintenanceCancelled, run_elevated_spooler_maintenance
 from .statistics_writer import CSV_HEADER, MonthlyStatisticsWriter
 from .task_service import TaskService
-from .worker_service import WorkerService
+from .worker_service import WorkerService, WorkerValidationError
 from .debug_logger import debug_exception, debug_log, initialize_debug_logging, install_qt_message_handler
 
 
@@ -174,6 +174,7 @@ class MainWindow(QMainWindow):
         self.current_preview_pixmap: QPixmap | None = None
         self._spool_total = 0
         self._spooler_maintenance_active = False
+        self.worker_config_error: str | None = None
 
         self._saved_ui_scale = int(self.app_settings.get("ui_scale", 100))
         self._ui_scale_applied_once = False
@@ -1071,6 +1072,7 @@ class MainWindow(QMainWindow):
 
     def reload_workers(self) -> None:
         self.workers = self.worker_service.load_workers(self.current_worker_group)
+        self.worker_config_error = None
         self.worker_table.setRowCount(len(self.workers))
         self.worker_row_by_name.clear()
         for row, worker in enumerate(self.workers):
@@ -1112,6 +1114,11 @@ class MainWindow(QMainWindow):
             self._set_worker_status_item(row, "Idle")
 
         self.on_log_text(f"已加载方案组 {self.current_worker_group}，共 {len(self.workers)} 个 Worker。")
+        try:
+            self.worker_service.validate_workers(self.workers)
+        except WorkerValidationError as exc:
+            self.worker_config_error = str(exc)
+            self.on_log_text(f"Worker 配置无效：{exc}")
 
     def save_worker_settings(self) -> None:
         for row, worker in enumerate(self.workers):
@@ -1207,6 +1214,17 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "请至少勾选一个要发送的任务。")
             return
         self.save_worker_settings()
+        try:
+            self.worker_service.validate_workers(self.workers)
+        except WorkerValidationError as exc:
+            self.worker_config_error = str(exc)
+            self.on_log_text(f"Worker 配置无效：{exc}")
+            QMessageBox.critical(
+                self,
+                "Worker配置无效",
+                f"Worker 名称必须唯一，且不能为空。\n\n{exc}",
+            )
+            return
         try:
             self.controller.validate_environment()
         except Exception as exc:
