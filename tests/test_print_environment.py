@@ -15,6 +15,8 @@ class PrintEnvironmentTests(TestCase):
         with patch("printfarm.spooler.sys.platform", "linux"):
             with self.assertRaisesRegex(RuntimeError, "only supported on Windows"):
                 PrinterSpooler.validate_environment()
+            with self.assertRaisesRegex(RuntimeError, "InkSwarm 打印仅支持 Windows"):
+                PrinterSpooler.validate_environment(language="zh-Hans")
 
     def test_controller_start_aborts_before_thread_when_environment_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

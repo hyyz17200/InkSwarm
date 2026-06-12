@@ -8,6 +8,7 @@ from typing import Any, cast
 import pypdfium2 as pdfium
 from PIL import Image, ImageCms, ImageFile
 
+from .i18n import normalize_language, translate
 from .models import DEFAULT_RASTER_DPI
 
 Image.MAX_IMAGE_PIXELS = None
@@ -28,18 +29,23 @@ class TaskInspectionError(RuntimeError):
     pass
 
 
-def inspect_task_input(file_path: Path, preview_max_size: tuple[int, int] = (320, 320)) -> TaskInspection:
+def inspect_task_input(
+    file_path: Path,
+    preview_max_size: tuple[int, int] = (320, 320),
+    language: str = "en",
+) -> TaskInspection:
+    language = normalize_language(language)
     suffix = file_path.suffix.lower()
     if suffix == ".pdf":
-        return _inspect_pdf(file_path, preview_max_size)
-    return _inspect_image(file_path, preview_max_size)
+        return _inspect_pdf(file_path, preview_max_size, language)
+    return _inspect_image(file_path, preview_max_size, language)
 
 
-def _inspect_pdf(file_path: Path, preview_max_size: tuple[int, int]) -> TaskInspection:
+def _inspect_pdf(file_path: Path, preview_max_size: tuple[int, int], language: str) -> TaskInspection:
     document = pdfium.PdfDocument(str(file_path))
     try:
         if len(document) == 0:
-            raise TaskInspectionError("PDF 没有页面")
+            raise TaskInspectionError(translate(language, "task_inspector.empty_pdf"))
         first_page = document[0]
         width_pt = float(first_page.get_width())
         height_pt = float(first_page.get_height())
@@ -60,13 +66,13 @@ def _inspect_pdf(file_path: Path, preview_max_size: tuple[int, int]) -> TaskInsp
         document.close()
 
 
-def _inspect_image(file_path: Path, preview_max_size: tuple[int, int]) -> TaskInspection:
+def _inspect_image(file_path: Path, preview_max_size: tuple[int, int], language: str) -> TaskInspection:
     try:
         with Image.open(file_path) as image:
             mode = image.mode
             embedded_profile = image.info.get("icc_profile")
             if mode == "CMYK" and not embedded_profile:
-                raise TaskInspectionError("CMYK 文件没有嵌入 ICC，已跳过")
+                raise TaskInspectionError(translate(language, "task_inspector.cmyk_missing_icc"))
 
             dpi_x, dpi_y = get_image_dpi(image)
             width_mm = image.width / dpi_x * MM_PER_INCH
@@ -111,5 +117,5 @@ def _image_to_png_bytes(image: Image.Image, preview_max_size: tuple[int, int]) -
 def _format_mm(width_mm: float, height_mm: float, page_count: int) -> str:
     base = f"{round(width_mm)} × {round(height_mm)} mm"
     if page_count > 1:
-        return f"{base} · {page_count}页"
+        return f"{base} · {page_count} pages"
     return base

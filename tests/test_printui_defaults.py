@@ -113,6 +113,13 @@ class PrintUIDefaultsTests(TestCase):
         ensure_defaults.assert_not_called()
         run_printui.assert_called_once()
 
+    def test_windows_only_message_defaults_to_english_and_can_localize(self) -> None:
+        with patch("printfarm.printui.sys.platform", "linux"):
+            with self.assertRaisesRegex(RuntimeError, "PrintUI is only supported on Windows"):
+                printui.open_printer_preferences("PrinterA")
+            with self.assertRaisesRegex(RuntimeError, "PrintUI 仅支持 Windows"):
+                printui.open_printer_preferences("PrinterA", language="zh-Hans")
+
 
 class RunServicePrinterDefaultsOptionTests(TestCase):
     def test_printer_defaults_check_defaults_to_enabled(self) -> None:

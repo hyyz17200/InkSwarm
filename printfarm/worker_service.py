@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .config_store import ConfigStore
+from .i18n import normalize_language, translate
 from .models import WorkerConfig
 from .printui import (
     open_printer_preferences,
@@ -56,28 +57,49 @@ class WorkerService:
     def validate_workers(workers: Iterable[WorkerConfig]) -> None:
         validate_unique_worker_names(workers)
 
-    def restore_preset_if_any(self, worker: WorkerConfig, initialize_defaults: bool = True) -> str | None:
+    def restore_preset_if_any(
+        self,
+        worker: WorkerConfig,
+        initialize_defaults: bool = True,
+        language: str = "en",
+    ) -> str | None:
+        language = normalize_language(language)
         preset = worker.get_active_preset()
         snapshot_path = worker.resolve_path(preset.printui_restore_file) if preset.printui_restore_file else None
         if snapshot_path and snapshot_path.exists():
-            restore_printer_settings(worker.printer_name, snapshot_path, initialize_defaults=initialize_defaults)
-            return f"已载入 {worker.name}/{preset.name} 的驱动快照。"
+            restore_printer_settings(
+                worker.printer_name,
+                snapshot_path,
+                initialize_defaults=initialize_defaults,
+                language=language,
+            )
+            return translate(language, "worker.preset_restored", worker_name=worker.name, preset_name=preset.name)
         return None
 
     @staticmethod
-    def open_preferences(worker: WorkerConfig) -> None:
-        open_printer_preferences(worker.printer_name)
+    def open_preferences(worker: WorkerConfig, language: str = "en") -> None:
+        open_printer_preferences(worker.printer_name, language=language)
 
     @staticmethod
-    def open_properties(worker: WorkerConfig) -> None:
-        open_printer_properties(worker.printer_name)
+    def open_properties(worker: WorkerConfig, language: str = "en") -> None:
+        open_printer_properties(worker.printer_name, language=language)
 
-    def capture_snapshot(self, worker: WorkerConfig, initialize_defaults: bool = True) -> Path:
+    def capture_snapshot(
+        self,
+        worker: WorkerConfig,
+        initialize_defaults: bool = True,
+        language: str = "en",
+    ) -> Path:
         preset = worker.get_active_preset()
         snapshot_path = worker.resolve_path(preset.printui_restore_file) if preset.printui_restore_file else None
         if snapshot_path is None:
             snapshot_path = worker.directory / f"{preset.name}.dat"
             preset.printui_restore_file = snapshot_path.name
-        save_printer_settings(worker.printer_name, snapshot_path, initialize_defaults=initialize_defaults)
+        save_printer_settings(
+            worker.printer_name,
+            snapshot_path,
+            initialize_defaults=initialize_defaults,
+            language=language,
+        )
         self.store.save_worker(worker)
         return snapshot_path

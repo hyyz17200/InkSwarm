@@ -6,9 +6,11 @@ from unittest.mock import patch
 import json
 import tempfile
 
+from PIL import Image
+
 from printfarm.config_store import ConfigStore
 from printfarm.models import TaskItem
-from printfarm.task_inspector import TaskInspection, TaskInspectionError
+from printfarm.task_inspector import TaskInspection, TaskInspectionError, inspect_task_input
 from printfarm.task_service import TaskService
 
 
@@ -26,7 +28,7 @@ class TaskServiceAddFilesTests(TestCase):
             self.assertEqual(result.added_count, 0)
             self.assertEqual(len(result.skipped), 1)
             self.assertEqual(result.skipped[0].file_path, missing)
-            self.assertEqual(result.skipped[0].reason, "文件不存在")
+            self.assertEqual(result.skipped[0].reason, "File does not exist")
 
     def test_unsupported_file_type_is_reported_as_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -40,7 +42,7 @@ class TaskServiceAddFilesTests(TestCase):
             self.assertEqual(result.added_count, 0)
             self.assertEqual(len(result.skipped), 1)
             self.assertEqual(result.skipped[0].file_path, unsupported)
-            self.assertEqual(result.skipped[0].reason, "不支持的文件类型")
+            self.assertEqual(result.skipped[0].reason, "Unsupported file type")
 
     def test_duplicate_file_is_reported_as_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -55,7 +57,22 @@ class TaskServiceAddFilesTests(TestCase):
             self.assertEqual(result.added_count, 0)
             self.assertEqual(len(result.skipped), 1)
             self.assertEqual(result.skipped[0].file_path, pdf.resolve())
-            self.assertEqual(result.skipped[0].reason, "已在任务列表中")
+            self.assertEqual(result.skipped[0].reason, "Already in task list")
+
+    def test_known_skip_reasons_localize_to_chinese_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = self.make_service(root)
+            missing = root / "missing.pdf"
+            unsupported = root / "notes.txt"
+            unsupported.write_text("not printable", encoding="utf-8")
+            pdf = root / "job.pdf"
+            pdf.write_bytes(b"%PDF")
+            existing = [TaskItem(file_path=pdf.resolve())]
+
+            result = service.add_files(existing, [missing, unsupported, pdf], language="zh-Hans")
+
+            self.assertEqual([item.reason for item in result.skipped], ["文件不存在", "不支持的文件类型", "已在任务列表中"])
 
     def test_successful_and_failed_inspections_keep_existing_behavior(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -66,7 +83,7 @@ class TaskServiceAddFilesTests(TestCase):
             good.write_bytes(b"%PDF")
             bad.write_bytes(b"%PDF")
 
-            def inspect(path: Path) -> TaskInspection:
+            def inspect(path: Path, *, language: str = "en") -> TaskInspection:
                 if path == bad.resolve():
                     raise TaskInspectionError("broken pdf")
                 return TaskInspection(display_size_mm="10 x 10 mm", preview_bytes=b"preview")
@@ -106,4 +123,32 @@ class TaskServiceRestoreTests(TestCase):
             self.assertEqual(result.add_result.added_count, 0)
             self.assertEqual(len(result.add_result.skipped), 1)
             self.assertEqual(result.add_result.skipped[0].file_path, missing)
-            self.assertEqual(result.add_result.skipped[0].reason, "文件不存在")
+            self.assertEqual(result.add_result.skipped[0].reason, "File does not exist")
+
+
+class TaskInspectionLocalizationTests(TestCase):
+    def test_empty_pdf_error_localizes(self) -> None:
+        class EmptyDocument:
+            def __len__(self) -> int:
+                return 0
+
+            def close(self) -> None:
+                pass
+
+        with patch("printfarm.task_inspector.pdfium.PdfDocument", return_value=EmptyDocument()):
+            with self.assertRaisesRegex(TaskInspectionError, "PDF has no pages"):
+                inspect_task_input(Path("empty.pdf"))
+
+        with patch("printfarm.task_inspector.pdfium.PdfDocument", return_value=EmptyDocument()):
+            with self.assertRaisesRegex(TaskInspectionError, "PDF 没有页面"):
+                inspect_task_input(Path("empty.pdf"), language="zh-Hans")
+
+    def test_cmyk_without_icc_error_localizes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "cmyk.jpg"
+            Image.new("CMYK", (4, 4)).save(image_path)
+
+            with self.assertRaisesRegex(TaskInspectionError, "CMYK file has no embedded ICC"):
+                inspect_task_input(image_path)
+            with self.assertRaisesRegex(TaskInspectionError, "CMYK 文件没有嵌入 ICC"):
+                inspect_task_input(image_path, language="zh-Hans")

@@ -14,6 +14,17 @@ import uuid
 
 
 CSV_HEADER = [
+    "Task Started At",
+    "Last Success At",
+    "File Name",
+    "Requested Copies",
+    "Successful Copies",
+    "Unfinished Copies",
+    "Completion Status",
+    "Run ID",
+    "Task ID",
+]
+CHINESE_CSV_HEADER = [
     "任务启动时刻",
     "最后成功时刻",
     "文件名",
@@ -56,7 +67,7 @@ class MonthlyStatisticsReport:
     @property
     def total_success_copies(self) -> int:
         try:
-            success_index = self.header.index("成功张数")
+            success_index = self.header.index("Successful Copies")
         except ValueError:
             success_index = 4
         total = 0
@@ -323,7 +334,7 @@ class MonthlyStatisticsWriter:
             started_at_ts = float(task.get("started_at_ts", default_started_at) or default_started_at)
             last_success_ts = task.get("last_success_at_ts")
             unfinished = max(0, requested - success)
-            status = "完成" if requested > 0 and success >= requested else "未完成"
+            status = "Complete" if requested > 0 and success >= requested else "Incomplete"
             rows.append(
                 [
                     self._format_ts(started_at_ts),
@@ -405,12 +416,14 @@ class MonthlyStatisticsWriter:
             return []
         header = rows[0]
         if header == CSV_HEADER:
-            return [self._pad_csv_row(row) for row in rows[1:] if any(row)]
+            return [self._normalize_csv_row_values(row) for row in rows[1:] if any(row)]
+        if header == CHINESE_CSV_HEADER:
+            return [self._normalize_csv_row_values(row) for row in rows[1:] if any(row)]
         if header == LEGACY_CSV_HEADER:
             return self._migrate_legacy_rows(rows[1:])
         if len(header) == len(LEGACY_CSV_HEADER):
             return self._migrate_legacy_rows(rows)
-        return [self._pad_csv_row(row) for row in rows[1:] if any(row)]
+        return [self._normalize_csv_row_values(row) for row in rows[1:] if any(row)]
 
     def _migrate_legacy_rows(self, rows: list[list[str]]) -> list[list[str]]:
         migrated: list[list[str]] = []
@@ -426,12 +439,26 @@ class MonthlyStatisticsWriter:
                     str(quantity),
                     str(quantity),
                     "0",
-                    "完成",
+                    "Complete",
                     f"legacy-{index:06d}",
                     f"legacy-{index:06d}",
                 ]
             )
         return migrated
+
+    def _normalize_csv_row_values(self, row: list[str]) -> list[str]:
+        normalized = self._pad_csv_row(row)
+        normalized[6] = self._normalize_completion_status(normalized[6])
+        return normalized
+
+    @staticmethod
+    def _normalize_completion_status(value: str) -> str:
+        text = str(value).strip()
+        if text == "完成":
+            return "Complete"
+        if text == "未完成":
+            return "Incomplete"
+        return text
 
     def _pad_csv_row(self, row: list[str]) -> list[str]:
         padded = [str(value) for value in row[: len(CSV_HEADER)]]

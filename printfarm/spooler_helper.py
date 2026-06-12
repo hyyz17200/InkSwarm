@@ -11,10 +11,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--result-file", required=True)
     parser.add_argument("--events-file", required=True)
     parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument("--language", default="en")
     args = parser.parse_args(argv)
 
     return run_spooler_maintenance_helper(
         result_file=Path(args.result_file),
         events_file=Path(args.events_file),
         timeout_seconds=args.timeout,
+        language=args.language,
     )

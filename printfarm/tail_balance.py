@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import threading
 import time
 
+from .i18n import normalize_language, translate
 from .models import WorkerConfig, WorkerTaskBatch
 
 
@@ -30,7 +31,14 @@ class _StolenBatch:
 
 
 class TailBalanceCoordinator:
-    def __init__(self, workers: list[WorkerConfig], idle_seconds: int = 15, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        workers: list[WorkerConfig],
+        idle_seconds: int = 15,
+        enabled: bool = True,
+        language: str = "en",
+    ) -> None:
+        self.language = normalize_language(language)
         self.enabled = bool(enabled)
         self.idle_seconds = max(1, int(idle_seconds))
         self._workers = {worker.name: worker for worker in workers}
@@ -50,7 +58,7 @@ class TailBalanceCoordinator:
             return
         with self._condition:
             if self._dispatch_closed:
-                raise RuntimeError("尾段均衡调度已关闭，不能继续加入任务")
+                raise RuntimeError(translate(self.language, "tail_balance.dispatch_closed"))
             self._pending.setdefault(batch.worker_name, deque()).append(batch)
             self._outstanding_batches += 1
             self._condition.notify_all()

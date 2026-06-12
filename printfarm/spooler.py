@@ -9,6 +9,7 @@ from typing import Any, Callable
 from PIL import Image, ImageFile, ImageWin
 
 from .debug_logger import debug_exception, debug_log
+from .i18n import normalize_language, translate
 
 Image.MAX_IMAGE_PIXELS = None
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -19,15 +20,17 @@ win32print: Any = None
 
 
 class PrinterSpooler:
-    def __init__(self) -> None:
-        self.validate_environment()
+    def __init__(self, language: str = "en") -> None:
+        self.language = normalize_language(language)
+        self.validate_environment(language=self.language)
         self._queue_waiting_states: dict[str, bool] = {}
         self._queue_pause_last_log_ts: dict[str, float] = {}
 
     @staticmethod
-    def validate_environment() -> None:
+    def validate_environment(language: str = "en") -> None:
+        language = normalize_language(language)
         if sys.platform != "win32":
-            raise RuntimeError("InkSwarm printing is only supported on Windows.")
+            raise RuntimeError(translate(language, "spooler.windows_only"))
         global win32ui, win32con, win32print
         try:
             import win32ui as _win32ui  # type: ignore
@@ -35,12 +38,9 @@ class PrinterSpooler:
             import win32print as _win32print  # type: ignore
         except ModuleNotFoundError as exc:
             missing = exc.name or str(exc)
-            raise RuntimeError(
-                f"Windows printing dependency is missing: {missing}. "
-                "Install pywin32 in the Python environment running InkSwarm."
-            ) from exc
+            raise RuntimeError(translate(language, "spooler.dependency_missing", missing=missing)) from exc
         except ImportError as exc:
-            raise RuntimeError(f"Windows printing dependencies failed to import: {exc}") from exc
+            raise RuntimeError(translate(language, "spooler.dependency_import_failed", error=exc)) from exc
 
         win32ui = _win32ui
         win32con = _win32con
@@ -64,27 +64,29 @@ class PrinterSpooler:
         log_callback: Callable[[str], None] | None = None,
         log_cooldown_seconds: float = 60.0,
         pause_callback: Callable[[], bool] | None = None,
+        language: str | None = None,
     ) -> None:
+        active_language = normalize_language(language or self.language)
         if max_queue_jobs <= 0:
             self._queue_waiting_states.pop(printer_name, None)
             return
         while True:
             if stop_event is not None and stop_event.is_set():
-                raise RuntimeError("已停止")
+                raise RuntimeError(translate(active_language, "runtime.stopped"))
             if pause_callback is not None and not pause_callback():
-                raise RuntimeError("已停止")
+                raise RuntimeError(translate(active_language, "runtime.stopped"))
             depth = self.get_queue_depth(printer_name)
             if depth < max_queue_jobs:
                 self._queue_waiting_states[printer_name] = False
                 return
             if status_callback is not None:
-                status_callback(f"Queue {depth}/{max_queue_jobs}，暂停发送")
+                status_callback(translate(active_language, "spooler.queue_status", depth=depth, limit=max_queue_jobs))
             already_waiting = self._queue_waiting_states.get(printer_name, False)
             last_log_ts = self._queue_pause_last_log_ts.get(printer_name, 0.0)
             now = time.time()
             should_log = (not already_waiting) and (now - last_log_ts >= max(1.0, log_cooldown_seconds))
             if log_callback is not None and should_log:
-                log_callback(f"队列等待任务数 {depth} 已达到上限 {max_queue_jobs}，暂停该 Worker 发送。")
+                log_callback(translate(active_language, "spooler.queue_limit_log", depth=depth, limit=max_queue_jobs))
                 self._queue_pause_last_log_ts[printer_name] = now
             self._queue_waiting_states[printer_name] = True
             time.sleep(max(0.2, poll_seconds))
@@ -155,7 +157,7 @@ class PrinterSpooler:
         width_mm = float(page_spec.get("width_mm", 0))
         height_mm = float(page_spec.get("height_mm", 0))
         if width_mm <= 0 or height_mm <= 0:
-            raise RuntimeError("页面物理尺寸缺失，无法按 1:1 打印")
+            raise RuntimeError(translate(self.language, "spooler.page_size_missing"))
 
         dst_w = max(1, round(width_mm / 25.4 * dpi_x))
         dst_h = max(1, round(height_mm / 25.4 * dpi_y))

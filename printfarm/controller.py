@@ -8,8 +8,10 @@ import time
 
 from PySide6.QtCore import QObject, Signal
 
+from .i18n import normalize_language, translate
 from .models import LogMessage, RunOptions, TaskItem, TaskStatusMessage, WorkerConfig, WorkerStatusMessage, WorkerTaskBatch
 from .debug_logger import debug_exception, debug_log
+from .local_logger import QUEUE_LIMIT_LOG_KEY
 from .printer_access import PrinterAccessCoordinator
 from .printui import restore_printer_settings
 from .renderer import Renderer
@@ -89,8 +91,11 @@ class WorkerRuntime(threading.Thread):
         self.tail_coordinator = tail_coordinator
         self.spooler: PrinterSpooler | None = None
 
+    def _t(self, key: str, **kwargs: object) -> str:
+        return translate(self.run_options.language, key, **kwargs)
+
     def run(self) -> None:
-        self.spooler = PrinterSpooler()
+        self.spooler = PrinterSpooler(language=self.run_options.language)
         self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, "Idle"))
         while True:
             assignment = self._next_assignment()
@@ -109,7 +114,13 @@ class WorkerRuntime(threading.Thread):
                     self.signals.log.emit(
                         LogMessage(
                             "info",
-                            f"尾段均衡: {self.worker.name} 从 {assignment.stolen_from} 接手 {batch.task.file_name()} ×{batch.copies}",
+                            self._t(
+                                "controller.tail_balance",
+                                worker_name=self.worker.name,
+                                from_worker=assignment.stolen_from,
+                                file_name=batch.task.file_name(),
+                                copies=batch.copies,
+                            ),
                         )
                     )
                 self._process_batch(batch, assignment.active_id)
@@ -151,7 +162,13 @@ class WorkerRuntime(threading.Thread):
         self.signals.log.emit(
             LogMessage(
                 "info",
-                f"{self.worker.name}: 使用缓存 {artifact.cache_dir.name}，打印 {batch.task.file_name()} ×{batch.copies}",
+                self._t(
+                    "controller.using_cache",
+                    worker_name=self.worker.name,
+                    cache_name=artifact.cache_dir.name,
+                    file_name=batch.task.file_name(),
+                    copies=batch.copies,
+                ),
             )
         )
         self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, f"Printing {batch.task.file_name()} ×{batch.copies}"))
@@ -162,9 +179,9 @@ class WorkerRuntime(threading.Thread):
 
         def before_each_copy(current_copy: int, total_copies: int) -> bool | None:
             if self.stop_event.is_set():
-                raise RuntimeError("已停止")
+                raise RuntimeError(self._t("controller.stopped"))
             if not self._wait_for_resume(f"Paused {batch.task.file_name()}"):
-                raise RuntimeError("已停止")
+                raise RuntimeError(self._t("controller.stopped"))
             if self.run_options.worker_queue_limit_enabled and self.run_options.worker_queue_limit > 0:
                 spooler.wait_until_queue_available(
                     printer_name=batch.printer_name,
@@ -172,12 +189,15 @@ class WorkerRuntime(threading.Thread):
                     poll_seconds=self.run_options.queue_poll_seconds,
                     stop_event=self.stop_event,
                     status_callback=lambda status: self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, status)),
-                    log_callback=lambda msg: self.signals.log.emit(LogMessage("info", f"{self.worker.name}: {msg}")),
+                    log_callback=lambda msg: self.signals.log.emit(
+                        LogMessage("info", f"{self.worker.name}: {msg}", once_key=QUEUE_LIMIT_LOG_KEY)
+                    ),
                     log_cooldown_seconds=60.0,
                     pause_callback=lambda: self._wait_for_resume(f"Paused {batch.task.file_name()}"),
+                    language=self.run_options.language,
                 )
             if not self._wait_for_resume(f"Paused {batch.task.file_name()}"):
-                raise RuntimeError("已停止")
+                raise RuntimeError(self._t("controller.stopped"))
             if self.tail_coordinator is not None and active_id is not None:
                 if not self.tail_coordinator.claim_active_copy(self.worker.name, active_id):
                     return False
@@ -191,7 +211,16 @@ class WorkerRuntime(threading.Thread):
 
         def on_printer_wait() -> None:
             self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, f"Waiting printer {batch.printer_name}"))
-            self.signals.log.emit(LogMessage("info", f"{self.worker.name}: 等待打印机 {batch.printer_name} 完成前一个受保护提交。"))
+            self.signals.log.emit(
+                LogMessage(
+                    "info",
+                    self._t(
+                        "controller.printer_wait",
+                        worker_name=self.worker.name,
+                        printer_name=batch.printer_name,
+                    ),
+                )
+            )
 
         with self.printer_access.hold(
             batch.printer_name,
@@ -200,14 +229,24 @@ class WorkerRuntime(threading.Thread):
             stop_event=self.stop_event,
         ):
             if not self._wait_for_resume(f"Paused {batch.task.file_name()}"):
-                raise RuntimeError("已停止")
+                raise RuntimeError(self._t("controller.stopped"))
             if restore_file:
-                self.signals.log.emit(LogMessage("info", f"{self.worker.name}: 恢复驱动预设 {restore_file.name}"))
+                self.signals.log.emit(
+                    LogMessage(
+                        "info",
+                        self._t(
+                            "controller.restore_preset",
+                            worker_name=self.worker.name,
+                            preset_name=restore_file.name,
+                        ),
+                    )
+                )
                 self._run_spool_send(
                     lambda: restore_printer_settings(
                         self.worker.printer_name,
                         restore_file,
                         initialize_defaults=self.run_options.printer_defaults_check_enabled,
+                        language=self.run_options.language,
                     )
                 )
             spooler.print_cached_pages(
@@ -233,7 +272,7 @@ class WorkerRuntime(threading.Thread):
 
     def _begin_spool_send(self, paused_label: str) -> None:
         if not self._wait_for_resume(f"Paused {paused_label}"):
-            raise RuntimeError("已停止")
+            raise RuntimeError(self._t("controller.stopped"))
         self.spool_send_start_callback()
 
     def _run_spool_send(self, callback) -> None:
@@ -260,6 +299,7 @@ class PrintController:
         self._task_started_at: dict[str, float] = {}
         self._task_file_names: dict[str, str] = {}
         self._statistics_run_id: str | None = None
+        self._language = "en"
         self._spool_target = 0
         self._spool_progress = 0
         self._flush_pending_statistics("startup", emit_log=False)
@@ -270,15 +310,20 @@ class PrintController:
     def is_paused(self) -> bool:
         return self._pause_gate.is_paused()
 
+    def _t(self, key: str, **kwargs: object) -> str:
+        return translate(self._language, key, **kwargs)
+
     @staticmethod
-    def validate_environment() -> None:
-        PrinterSpooler.validate_environment()
+    def validate_environment(language: str = "en") -> None:
+        PrinterSpooler.validate_environment(language=language)
 
     def start(self, tasks: list[TaskItem], workers: list[WorkerConfig], run_options: RunOptions | None = None) -> None:
         if self.is_running():
-            raise RuntimeError("当前已有流程正在运行")
-        self.validate_environment()
+            raise RuntimeError(self._t("controller.run_already_active"))
         options = run_options or RunOptions()
+        options.language = normalize_language(options.language)
+        self._language = options.language
+        self.validate_environment(language=options.language)
         self._flush_pending_statistics("start")
         self._stop_event.clear()
         self._set_paused(False, emit=False)
@@ -305,7 +350,7 @@ class PrintController:
             )
         except Exception as exc:
             debug_exception("PrintController.start.statistics_begin", exc)
-            self.signals.log.emit(LogMessage("warning", f"统计快照初始化失败，本次流程可能无法自动恢复统计: {exc}"))
+            self.signals.log.emit(LogMessage("warning", self._t("controller.statistics_begin_failed", error=exc)))
         with self._spool_activity:
             self._active_spool_sends = 0
         self.signals.spool_progress.emit(0, self._spool_target)
@@ -318,21 +363,21 @@ class PrintController:
         debug_log("controller stop requested")
         self._stop_event.set()
         self._set_paused(False)
-        self.signals.log.emit(LogMessage("warning", "收到停止请求，当前页完成后会结束。"))
+        self.signals.log.emit(LogMessage("warning", self._t("controller.stop_requested")))
 
     def pause(self) -> None:
         if not self.is_running() or self.is_paused():
             return
         debug_log("controller pause requested")
         self._set_paused(True)
-        self.signals.log.emit(LogMessage("warning", "收到暂停请求，已发送任务继续，恢复前不再发送新任务。"))
+        self.signals.log.emit(LogMessage("warning", self._t("controller.pause_requested")))
 
     def resume(self) -> None:
         if not self.is_paused():
             return
         debug_log("controller resume requested")
         self._set_paused(False)
-        self.signals.log.emit(LogMessage("info", "已恢复发送。"))
+        self.signals.log.emit(LogMessage("info", self._t("controller.resume_requested")))
 
     def toggle_pause(self) -> None:
         if self.is_paused():
@@ -357,13 +402,19 @@ class PrintController:
             target_orientation=run_options.target_orientation,
             rip_limit_enabled=run_options.rip_limit_enabled,
             rip_limit_ppi=run_options.rip_limit_ppi,
+            language=run_options.language,
         )
         queues: dict[str, queue.Queue[WorkerTaskBatch | None]] = {}
         runtimes: list[WorkerRuntime] = []
-        printer_access = PrinterAccessCoordinator()
+        printer_access = PrinterAccessCoordinator(language=run_options.language)
         active_workers = [worker for worker in workers if worker.enabled and worker.printer_name.strip()]
         tail_coordinator = (
-            TailBalanceCoordinator(active_workers, idle_seconds=run_options.tail_balance_idle_seconds, enabled=True)
+            TailBalanceCoordinator(
+                active_workers,
+                idle_seconds=run_options.tail_balance_idle_seconds,
+                enabled=True,
+                language=run_options.language,
+            )
             if run_options.tail_balance_enabled
             else None
         )
@@ -401,7 +452,7 @@ class PrintController:
                 self._mark_statistics_task_started(task, started_at)
                 self.signals.task_status.emit(TaskStatusMessage(task.task_id, "Scheduling"))
                 try:
-                    batches = scheduler.allocate(task, workers)
+                    batches = scheduler.allocate(task, workers, language=run_options.language)
                 except Exception as exc:
                     debug_exception(f"PrintController._run.allocate[{task.file_name()}]", exc)
                     self.signals.task_status.emit(TaskStatusMessage(task.task_id, "Error", error_message=str(exc)))
@@ -418,7 +469,15 @@ class PrintController:
                     else:
                         queues[batch.worker_name].put(batch)
                     self.signals.log.emit(
-                        LogMessage("info", f"调度 {task.file_name()} -> {batch.worker_name} ×{batch.copies}")
+                        LogMessage(
+                            "info",
+                            self._t(
+                                "controller.schedule",
+                                file_name=task.file_name(),
+                                worker_name=batch.worker_name,
+                                copies=batch.copies,
+                            ),
+                        )
                     )
                 if self._stop_event.is_set():
                     break
@@ -487,7 +546,9 @@ class PrintController:
                 )
             except Exception as exc:
                 debug_exception(f"PrintController._record_progress.statistics[{file_name}]", exc)
-                self.signals.log.emit(LogMessage("warning", f"统计快照写入失败: {file_name}: {exc}"))
+                self.signals.log.emit(
+                    LogMessage("warning", self._t("controller.statistics_snapshot_failed", file_name=file_name, error=exc))
+                )
         with self._lock:
             self._task_progress[task_id] += copies_done
             done = self._task_progress[task_id]
@@ -512,7 +573,12 @@ class PrintController:
             )
         except Exception as exc:
             debug_exception(f"PrintController._mark_statistics_task_started[{task.file_name()}]", exc)
-            self.signals.log.emit(LogMessage("warning", f"统计任务启动时间写入失败: {task.file_name()}: {exc}"))
+            self.signals.log.emit(
+                LogMessage(
+                    "warning",
+                    self._t("controller.statistics_task_start_failed", file_name=task.file_name(), error=exc),
+                )
+            )
 
     def _finish_statistics_run(self) -> None:
         run_id = self._statistics_run_id
@@ -523,12 +589,12 @@ class PrintController:
             result = self._statistics_writer.finish_run(run_id)
         except Exception as exc:
             debug_exception("PrintController._finish_statistics_run", exc)
-            self.signals.log.emit(LogMessage("warning", f"统计同步失败，pending 快照会保留以便下次重试: {exc}"))
+            self.signals.log.emit(LogMessage("warning", self._t("controller.statistics_sync_failed", error=exc)))
             return
         if not result.ok:
-            detail = "; ".join(result.errors) or f"{result.pending_runs} 个 pending 运行尚未同步"
+            detail = "; ".join(result.errors) or self._t("controller.pending_runs", count=result.pending_runs)
             debug_log(f"statistics flush pending context=finish detail={detail}")
-            self.signals.log.emit(LogMessage("warning", f"统计 CSV 暂时无法写入，已保留快照稍后重试: {detail}"))
+            self.signals.log.emit(LogMessage("warning", self._t("controller.statistics_csv_deferred", detail=detail)))
         elif result.flushed_runs:
             debug_log(f"statistics flush complete context=finish flushed_runs={result.flushed_runs}")
 
@@ -538,13 +604,13 @@ class PrintController:
         except Exception as exc:
             debug_exception(f"PrintController._flush_pending_statistics[{context}]", exc)
             if emit_log:
-                self.signals.log.emit(LogMessage("warning", f"历史统计同步失败，pending 快照会保留以便下次重试: {exc}"))
+                self.signals.log.emit(LogMessage("warning", self._t("controller.history_statistics_sync_failed", error=exc)))
             return
         if not result.ok:
-            detail = "; ".join(result.errors) or f"{result.pending_runs} 个 pending 运行尚未同步"
+            detail = "; ".join(result.errors) or self._t("controller.pending_runs", count=result.pending_runs)
             debug_log(f"statistics flush pending context={context} detail={detail}")
             if emit_log:
-                self.signals.log.emit(LogMessage("warning", f"历史统计 CSV 暂时无法写入，已保留快照稍后重试: {detail}"))
+                self.signals.log.emit(LogMessage("warning", self._t("controller.history_statistics_csv_deferred", detail=detail)))
         elif result.flushed_runs:
             debug_log(f"statistics flush complete context={context} flushed_runs={result.flushed_runs}")
 
@@ -565,6 +631,12 @@ class PrintController:
         self.signals.log.emit(
             LogMessage(
                 "info",
-                f"流程统计: 成功任务 {success_tasks}, 失败任务 {failed_tasks}, 成功张数 {success_copies}, 失败张数 {failed_copies}",
+                self._t(
+                    "controller.summary",
+                    success_tasks=success_tasks,
+                    failed_tasks=failed_tasks,
+                    success_copies=success_copies,
+                    failed_copies=failed_copies,
+                ),
             )
         )

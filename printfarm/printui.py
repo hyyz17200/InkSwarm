@@ -5,8 +5,11 @@ import subprocess
 import sys
 from typing import Any
 
+from .i18n import normalize_language, translate
 
-def _run_printui(args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+
+def _run_printui(args: list[str], check: bool = True, language: str = "en") -> subprocess.CompletedProcess[str]:
+    language = normalize_language(language)
     command = [
         "rundll32.exe",
         "printui.dll,PrintUIEntry",
@@ -14,7 +17,7 @@ def _run_printui(args: list[str], check: bool = True) -> subprocess.CompletedPro
     ]
     result = subprocess.run(command, capture_output=True, text=True, shell=False)
     if check and result.returncode != 0:
-        stderr = result.stderr.strip() or result.stdout.strip() or "未知错误"
+        stderr = result.stderr.strip() or result.stdout.strip() or translate(language, "printui.unknown_error")
         raise RuntimeError(stderr)
     return result
 
@@ -50,9 +53,10 @@ def _driver_default_devmode(win32print: Any, win32con: Any, pywintypes: Any, han
     return devmode
 
 
-def ensure_printer_defaults_initialized(printer_name: str) -> bool:
+def ensure_printer_defaults_initialized(printer_name: str, language: str = "en") -> bool:
+    language = normalize_language(language)
     if sys.platform != "win32":
-        raise RuntimeError("PrintUI 仅支持 Windows")
+        raise RuntimeError(translate(language, "printui.windows_only"))
     try:
         import pywintypes  # type: ignore
         import win32con  # type: ignore
@@ -95,21 +99,24 @@ def ensure_printer_defaults_initialized(printer_name: str) -> bool:
         finally:
             win32print.ClosePrinter(handle)
     except Exception as exc:
-        raise RuntimeError(
-            "初始化打印默认值失败。请以管理员权限设置一次该打印机的 Printing Defaults，"
-            "或在设置中关闭“初始化打印默认值检查”。"
-        ) from exc
+        raise RuntimeError(translate(language, "printui.defaults_init_failed")) from exc
     return True
 
 
-def restore_printer_settings(printer_name: str, data_file: Path, initialize_defaults: bool = True) -> None:
+def restore_printer_settings(
+    printer_name: str,
+    data_file: Path,
+    initialize_defaults: bool = True,
+    language: str = "en",
+) -> None:
+    language = normalize_language(language)
     if sys.platform != "win32":
-        raise RuntimeError("PrintUI 仅支持 Windows")
+        raise RuntimeError(translate(language, "printui.windows_only"))
     if not data_file.exists():
         raise FileNotFoundError(data_file)
     try:
         if initialize_defaults:
-            ensure_printer_defaults_initialized(printer_name)
+            ensure_printer_defaults_initialized(printer_name, language=language)
         _run_printui([
             "/Sr",
             f"/n{printer_name}",
@@ -120,18 +127,24 @@ def restore_printer_settings(printer_name: str, data_file: Path, initialize_defa
             "r",
             "p",
             "h",
-        ])
+        ], language=language)
     except Exception as exc:
-        raise RuntimeError(f"恢复打印机预设失败: {exc}") from exc
+        raise RuntimeError(translate(language, "printui.restore_failed", error=exc)) from exc
 
 
-def save_printer_settings(printer_name: str, data_file: Path, initialize_defaults: bool = True) -> None:
+def save_printer_settings(
+    printer_name: str,
+    data_file: Path,
+    initialize_defaults: bool = True,
+    language: str = "en",
+) -> None:
+    language = normalize_language(language)
     if sys.platform != "win32":
-        raise RuntimeError("PrintUI 仅支持 Windows")
+        raise RuntimeError(translate(language, "printui.windows_only"))
     data_file.parent.mkdir(parents=True, exist_ok=True)
     try:
         if initialize_defaults:
-            ensure_printer_defaults_initialized(printer_name)
+            ensure_printer_defaults_initialized(printer_name, language=language)
         _run_printui([
             "/Ss",
             f"/n{printer_name}",
@@ -140,18 +153,20 @@ def save_printer_settings(printer_name: str, data_file: Path, initialize_default
             "g",
             "u",
             "c",
-        ])
+        ], language=language)
     except Exception as exc:
-        raise RuntimeError(f"保存打印机预设失败: {exc}") from exc
+        raise RuntimeError(translate(language, "printui.save_failed", error=exc)) from exc
 
 
-def open_printer_preferences(printer_name: str) -> None:
+def open_printer_preferences(printer_name: str, language: str = "en") -> None:
+    language = normalize_language(language)
     if sys.platform != "win32":
-        raise RuntimeError("PrintUI 仅支持 Windows")
-    _run_printui(["/e", f"/n{printer_name}"], check=False)
+        raise RuntimeError(translate(language, "printui.windows_only"))
+    _run_printui(["/e", f"/n{printer_name}"], check=False, language=language)
 
 
-def open_printer_properties(printer_name: str) -> None:
+def open_printer_properties(printer_name: str, language: str = "en") -> None:
+    language = normalize_language(language)
     if sys.platform != "win32":
-        raise RuntimeError("PrintUI 仅支持 Windows")
-    _run_printui(["/p", f"/n{printer_name}"], check=False)
+        raise RuntimeError(translate(language, "printui.windows_only"))
+    _run_printui(["/p", f"/n{printer_name}"], check=False, language=language)

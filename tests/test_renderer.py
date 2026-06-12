@@ -75,3 +75,15 @@ class RendererImageRipPreshrinkTests(TestCase):
 
             self.assertEqual(shrunk.size, (800, 400))
             self.assertEqual(shrunk.info.get("icc_profile"), b"fake-profile")
+
+    def test_cmyk_without_icc_error_defaults_to_english_and_can_localize(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = Image.new("CMYK", (4, 4))
+            current_worker = worker(root)
+            preset = current_worker.get_active_preset()
+
+            with self.assertRaisesRegex(RuntimeError, "WorkerA: CMYK input has no available ICC"):
+                Renderer(root / "cache-en")._apply_color_transform(image, current_worker, preset)
+            with self.assertRaisesRegex(RuntimeError, "WorkerA: CMYK 输入没有可用 ICC"):
+                Renderer(root / "cache-zh", language="zh-Hans")._apply_color_transform(image, current_worker, preset)

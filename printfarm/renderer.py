@@ -10,6 +10,7 @@ import time
 import pypdfium2 as pdfium
 from PIL import Image, ImageCms, ImageFile
 
+from .i18n import normalize_language, translate
 from .models import INTENT_NAME_TO_PIL, PresetConfig, RenderArtifact, TaskItem, WorkerConfig, file_signature, stable_hash
 from .debug_logger import debug_exception, debug_log
 from .task_inspector import MM_PER_INCH, PDF_POINTS_PER_INCH, get_image_dpi
@@ -30,13 +31,22 @@ class PageRenderInfo(TypedDict):
 
 
 class Renderer:
-    def __init__(self, cache_root: Path, auto_orient_enabled: bool = False, target_orientation: str = "portrait", rip_limit_enabled: bool = True, rip_limit_ppi: int = 300):
+    def __init__(
+        self,
+        cache_root: Path,
+        auto_orient_enabled: bool = False,
+        target_orientation: str = "portrait",
+        rip_limit_enabled: bool = True,
+        rip_limit_ppi: int = 300,
+        language: str = "en",
+    ):
         self.cache_root = cache_root.resolve()
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.auto_orient_enabled = auto_orient_enabled
         self.target_orientation = (target_orientation or "portrait").lower()
         self.rip_limit_enabled = bool(rip_limit_enabled)
         self.rip_limit_ppi = max(36, int(rip_limit_ppi or 300))
+        self.language = normalize_language(language)
 
     def ensure_render_cache(self, task: TaskItem, worker: WorkerConfig) -> RenderArtifact:
         preset = worker.get_active_preset()
@@ -258,7 +268,7 @@ class Renderer:
             elif embedded_profile_bytes:
                 src_profile = ImageCms.getOpenProfile(BytesIO(embedded_profile_bytes))
             else:
-                raise RuntimeError(f"{worker.name}: CMYK 输入没有可用 ICC，已拒绝处理")
+                raise RuntimeError(translate(self.language, "renderer.cmyk_missing_icc", worker_name=worker.name))
         else:
             src_profile = ImageCms.createProfile("sRGB")
 

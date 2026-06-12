@@ -5,10 +5,12 @@ import threading
 from typing import Callable, Iterator
 
 from .debug_logger import debug_log
+from .i18n import normalize_language, translate
 
 
 class PrinterAccessCoordinator:
-    def __init__(self) -> None:
+    def __init__(self, language: str = "en") -> None:
+        self.language = normalize_language(language)
         self._guard = threading.Lock()
         self._locks: dict[str, threading.RLock] = {}
 
@@ -30,7 +32,7 @@ class PrinterAccessCoordinator:
                 wait_callback()
             while True:
                 if stop_event is not None and stop_event.is_set():
-                    raise RuntimeError("已停止")
+                    raise RuntimeError(translate(self.language, "printer_access.stopped"))
                 if lock.acquire(timeout=max(0.05, poll_seconds)):
                     break
         try:

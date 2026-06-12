@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 import copy
 
+from .i18n import normalize_language
 from .models import RunOptions, TaskItem, WorkerConfig
 from .worker_service import validate_unique_worker_names
 
@@ -42,6 +43,7 @@ class RunService:
             rip_limit_enabled=bool(settings.get("rip_limit_enabled", True)),
             rip_limit_ppi=int(settings.get("rip_limit_ppi", 300) or 300),
             printer_defaults_check_enabled=bool(settings.get("printer_defaults_check_enabled", True)),
+            language=normalize_language(settings.get("language", "en")),
         )
 
     @staticmethod

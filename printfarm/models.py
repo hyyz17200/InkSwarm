@@ -27,7 +27,7 @@ class TaskItem:
     file_path: Path
     copies: int = 1
     enabled: bool = True
-    display_size_mm: str = "读取中"
+    display_size_mm: str = "Reading"
     task_id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     status: str = "Pending"
     assigned_summary: str = ""
@@ -40,7 +40,7 @@ class TaskItem:
 
     def to_row(self) -> list[str]:
         return [
-            "启用" if self.enabled else "停用",
+            "Enabled" if self.enabled else "Disabled",
             self.file_name(),
             str(self.copies),
             self.display_size_mm,
@@ -198,6 +198,7 @@ class RunOptions:
     rip_limit_enabled: bool = True
     rip_limit_ppi: int = DEFAULT_RASTER_DPI
     printer_defaults_check_enabled: bool = True
+    language: str = "en"
 
 
 @dataclass
@@ -231,6 +232,7 @@ class LogMessage:
     level: str
     message: str
     timestamp: float = field(default_factory=time.time)
+    once_key: str | None = None
 
     def format(self) -> str:
         ts = time.strftime("%H:%M:%S", time.localtime(self.timestamp))

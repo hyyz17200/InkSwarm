@@ -165,6 +165,7 @@ class ConfigStore:
             "rip_limit_ppi": 300,
             "printer_defaults_check_enabled": True,
             "font_engine": "auto",
+            "language": "en",
             "task_default_copies": 1,
             "window_width": 1450,
             "vertical_pane_heights": None,

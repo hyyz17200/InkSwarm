@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tempfile
 from unittest import TestCase
+from unittest.mock import patch
 
-from printfarm.models import TaskItem, WorkerConfig
+from printfarm.config_store import ConfigStore
+from printfarm.models import PresetConfig, TaskItem, WorkerConfig
 from printfarm.run_service import RunService
-from printfarm.worker_service import WorkerValidationError, validate_unique_worker_names
+from printfarm.worker_service import WorkerService, WorkerValidationError, validate_unique_worker_names
 
 
 def worker(name: str, directory: str) -> WorkerConfig:
@@ -59,3 +62,29 @@ class WorkerValidationTests(TestCase):
                 ],
                 settings={},
             )
+
+
+class WorkerServiceLocalizationTests(TestCase):
+    def test_restore_preset_message_defaults_to_english_and_can_localize(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            preset = PresetConfig(name="Glossy", printui_restore_file="Glossy.dat")
+            current_worker = WorkerConfig(
+                name="WorkerA",
+                directory=root,
+                printer_name="PrinterA",
+                active_preset=preset.name,
+                presets={preset.name: preset},
+            )
+            (root / "Glossy.dat").write_bytes(b"snapshot")
+            service = WorkerService(ConfigStore(root))
+
+            with patch("printfarm.worker_service.restore_printer_settings"):
+                self.assertEqual(
+                    service.restore_preset_if_any(current_worker),
+                    "Loaded driver snapshot for WorkerA/Glossy.",
+                )
+                self.assertEqual(
+                    service.restore_preset_if_any(current_worker, language="zh-Hans"),
+                    "已载入 WorkerA/Glossy 的驱动快照。",
+                )

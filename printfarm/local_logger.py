@@ -9,7 +9,9 @@ QUEUE_LIMIT_LOG_KEY = "worker-queue-limit-paused"
 QUEUE_LIMIT_LOG_MARKERS = ("队列等待任务数 ", "已达到上限", "暂停该 Worker 发送。")
 
 
-def regular_log_once_key(text: str) -> str | None:
+def regular_log_once_key(text: str, once_key: str | None = None) -> str | None:
+    if once_key:
+        return once_key
     if all(marker in text for marker in QUEUE_LIMIT_LOG_MARKERS):
         return QUEUE_LIMIT_LOG_KEY
     return None
@@ -19,8 +21,8 @@ class RegularLogFilter:
     def __init__(self) -> None:
         self._seen_once_keys: set[str] = set()
 
-    def should_write(self, text: str) -> bool:
-        key = regular_log_once_key(text)
+    def should_write(self, text: str, once_key: str | None = None) -> bool:
+        key = regular_log_once_key(text, once_key=once_key)
         if key is None:
             return True
         if key in self._seen_once_keys:
