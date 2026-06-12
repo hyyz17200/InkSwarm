@@ -6,14 +6,11 @@ import time
 
 
 QUEUE_LIMIT_LOG_KEY = "worker-queue-limit-paused"
-QUEUE_LIMIT_LOG_MARKERS = ("队列等待任务数 ", "已达到上限", "暂停该 Worker 发送。")
 
 
-def regular_log_once_key(text: str, once_key: str | None = None) -> str | None:
+def regular_log_once_key(_text: str, once_key: str | None = None) -> str | None:
     if once_key:
         return once_key
-    if all(marker in text for marker in QUEUE_LIMIT_LOG_MARKERS):
-        return QUEUE_LIMIT_LOG_KEY
     return None
 
 

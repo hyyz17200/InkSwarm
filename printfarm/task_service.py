@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .config_store import ConfigStore
-from .i18n import normalize_language, translate
+from .i18n import DEFAULT_LANGUAGE, normalize_language, translate
 from .models import SUPPORTED_INPUT_SUFFIXES, TaskItem, TaskStatusMessage
 from .task_inspector import TaskInspectionError, build_preview_file, inspect_task_input
 
@@ -14,6 +14,7 @@ from .task_inspector import TaskInspectionError, build_preview_file, inspect_tas
 class SkippedTaskInput:
     file_path: Path
     reason: str
+    reason_key: str | None = None
 
 
 @dataclass
@@ -45,14 +46,32 @@ class TaskService:
         copies = max(1, int(default_copies))
         for path in files:
             if not path.exists():
-                result.skipped.append(SkippedTaskInput(path, translate(language, "task.skip.missing_file")))
+                result.skipped.append(
+                    SkippedTaskInput(
+                        path,
+                        translate(DEFAULT_LANGUAGE, "task.skip.missing_file"),
+                        "task.skip.missing_file",
+                    )
+                )
                 continue
             if path.suffix.lower() not in SUPPORTED_INPUT_SUFFIXES:
-                result.skipped.append(SkippedTaskInput(path, translate(language, "task.skip.unsupported")))
+                result.skipped.append(
+                    SkippedTaskInput(
+                        path,
+                        translate(DEFAULT_LANGUAGE, "task.skip.unsupported"),
+                        "task.skip.unsupported",
+                    )
+                )
                 continue
             resolved = path.resolve()
             if resolved in existing_paths:
-                result.skipped.append(SkippedTaskInput(resolved, translate(language, "task.skip.duplicate")))
+                result.skipped.append(
+                    SkippedTaskInput(
+                        resolved,
+                        translate(DEFAULT_LANGUAGE, "task.skip.duplicate"),
+                        "task.skip.duplicate",
+                    )
+                )
                 continue
             try:
                 inspection = inspect_task_input(resolved, language=language)

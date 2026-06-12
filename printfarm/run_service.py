@@ -19,7 +19,8 @@ class PreparedRun:
 
 class RunService:
     def prepare_start(self, tasks: list[TaskItem], workers: list[WorkerConfig], settings: dict[str, Any]) -> PreparedRun:
-        validate_unique_worker_names(workers)
+        language = normalize_language(settings.get("language", "en"))
+        validate_unique_worker_names(workers, language=language)
         active_tasks = [task for task in tasks if task.enabled]
         copied_tasks = copy.deepcopy(active_tasks)
         copied_workers = copy.deepcopy(workers)

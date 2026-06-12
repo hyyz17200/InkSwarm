@@ -297,7 +297,7 @@ class Renderer:
             flags=flags,
         )
         if rendered is None:
-            raise RuntimeError("ICC color transform failed")
+            raise RuntimeError(translate(self.language, "renderer.icc_transform_failed"))
         rendered.info.pop("icc_profile", None)
         debug_log(f"color transform end worker={worker.name} preset={preset.name} output_mode=RGB")
         return rendered.convert("RGB")

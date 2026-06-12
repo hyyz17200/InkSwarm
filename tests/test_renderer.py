@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -87,3 +88,14 @@ class RendererImageRipPreshrinkTests(TestCase):
                 Renderer(root / "cache-en")._apply_color_transform(image, current_worker, preset)
             with self.assertRaisesRegex(RuntimeError, "WorkerA: CMYK 输入没有可用 ICC"):
                 Renderer(root / "cache-zh", language="zh-Hans")._apply_color_transform(image, current_worker, preset)
+
+    def test_icc_transform_failure_can_localize_to_chinese(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = Image.new("RGB", (4, 4))
+            current_worker = worker(root)
+            preset = current_worker.get_active_preset()
+
+            with patch("printfarm.renderer.ImageCms.profileToProfile", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "ICC 颜色转换失败"):
+                    Renderer(root / "cache-zh", language="zh-Hans")._apply_color_transform(image, current_worker, preset)

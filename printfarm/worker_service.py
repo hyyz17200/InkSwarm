@@ -18,7 +18,8 @@ class WorkerValidationError(RuntimeError):
     pass
 
 
-def validate_unique_worker_names(workers: Iterable[WorkerConfig]) -> None:
+def validate_unique_worker_names(workers: Iterable[WorkerConfig], language: str = "en") -> None:
+    language = normalize_language(language)
     seen: dict[str, WorkerConfig] = {}
     errors: list[str] = []
     for worker in workers:
@@ -26,12 +27,18 @@ def validate_unique_worker_names(workers: Iterable[WorkerConfig]) -> None:
         display_name = raw_name.strip()
         normalized_name = display_name.casefold()
         if not normalized_name:
-            errors.append(f"Worker name cannot be empty: {worker.directory}")
+            errors.append(translate(language, "worker.validation.empty_name", directory=worker.directory))
             continue
         previous = seen.get(normalized_name)
         if previous is not None:
             errors.append(
-                f"Duplicate Worker name '{display_name}': {previous.directory} and {worker.directory}"
+                translate(
+                    language,
+                    "worker.validation.duplicate_name",
+                    name=display_name,
+                    first_directory=previous.directory,
+                    second_directory=worker.directory,
+                )
             )
             continue
         seen[normalized_name] = worker
@@ -54,8 +61,8 @@ class WorkerService:
         self.store.save_workers(workers)
 
     @staticmethod
-    def validate_workers(workers: Iterable[WorkerConfig]) -> None:
-        validate_unique_worker_names(workers)
+    def validate_workers(workers: Iterable[WorkerConfig], language: str = "en") -> None:
+        validate_unique_worker_names(workers, language=language)
 
     def restore_preset_if_any(
         self,

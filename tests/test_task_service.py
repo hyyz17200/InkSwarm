@@ -59,7 +59,7 @@ class TaskServiceAddFilesTests(TestCase):
             self.assertEqual(result.skipped[0].file_path, pdf.resolve())
             self.assertEqual(result.skipped[0].reason, "Already in task list")
 
-    def test_known_skip_reasons_localize_to_chinese_when_requested(self) -> None:
+    def test_known_skip_reasons_return_translation_keys_when_language_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             service = self.make_service(root)
@@ -72,7 +72,11 @@ class TaskServiceAddFilesTests(TestCase):
 
             result = service.add_files(existing, [missing, unsupported, pdf], language="zh-Hans")
 
-            self.assertEqual([item.reason for item in result.skipped], ["文件不存在", "不支持的文件类型", "已在任务列表中"])
+            self.assertEqual([item.reason for item in result.skipped], ["File does not exist", "Unsupported file type", "Already in task list"])
+            self.assertEqual(
+                [item.reason_key for item in result.skipped],
+                ["task.skip.missing_file", "task.skip.unsupported", "task.skip.duplicate"],
+            )
 
     def test_successful_and_failed_inspections_keep_existing_behavior(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

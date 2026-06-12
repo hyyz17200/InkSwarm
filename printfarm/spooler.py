@@ -80,7 +80,7 @@ class PrinterSpooler:
                 self._queue_waiting_states[printer_name] = False
                 return
             if status_callback is not None:
-                status_callback(translate(active_language, "spooler.queue_status", depth=depth, limit=max_queue_jobs))
+                status_callback(f"Queue {depth}/{max_queue_jobs}")
             already_waiting = self._queue_waiting_states.get(printer_name, False)
             last_log_ts = self._queue_pause_last_log_ts.get(printer_name, 0.0)
             now = time.time()

@@ -52,7 +52,7 @@ from .models import SUPPORTED_INPUT_SUFFIXES, TaskItem, TaskStatusMessage, Worke
 from .run_service import RunService
 from .spooler_service import SpoolerMaintenance, SpoolerMaintenanceCancelled, run_elevated_spooler_maintenance
 from .statistics_writer import CSV_HEADER, MonthlyStatisticsWriter
-from .task_service import TaskService
+from .task_service import SkippedTaskInput, TaskService
 from .worker_service import WorkerService, WorkerValidationError
 from .debug_logger import debug_exception, debug_log, initialize_debug_logging, install_qt_message_handler
 
@@ -524,9 +524,9 @@ class MainWindow(QMainWindow):
         form.addRow(self.t("settings.ui_scale"), scale_combo)
 
         font_engine_combo = QComboBox()
-        font_engine_combo.addItem("Auto", "auto")
-        font_engine_combo.addItem("GDI (disable DirectWrite)", "gdi")
-        font_engine_combo.addItem("FreeType", "freetype")
+        font_engine_combo.addItem(self.t("settings.font_engine.auto"), "auto")
+        font_engine_combo.addItem(self.t("settings.font_engine.gdi"), "gdi")
+        font_engine_combo.addItem(self.t("settings.font_engine.freetype"), "freetype")
         current_engine = str(self.app_settings.get("font_engine", "auto") or "auto").lower()
         engine_idx = font_engine_combo.findData(current_engine)
         if engine_idx >= 0:
@@ -546,8 +546,8 @@ class MainWindow(QMainWindow):
         form.addRow(self.t("settings.auto_orient"), orient_enabled_checkbox)
 
         orientation_combo = QComboBox()
-        orientation_combo.addItem("Portrait", "portrait")
-        orientation_combo.addItem("Landscape", "landscape")
+        orientation_combo.addItem(self.t("settings.orientation.portrait"), "portrait")
+        orientation_combo.addItem(self.t("settings.orientation.landscape"), "landscape")
         orient_idx = orientation_combo.findData(str(self.app_settings.get("target_orientation", "portrait") or "portrait").lower())
         if orient_idx >= 0:
             orientation_combo.setCurrentIndex(orient_idx)
@@ -991,7 +991,7 @@ class MainWindow(QMainWindow):
             return
         self.refresh_task_table()
         for skipped in result.add_result.skipped:
-            self.on_log_text(self.t("log.skip_file", file_name=skipped.file_path.name, reason=self._task_skip_reason_text(skipped.reason)))
+            self.on_log_text(self.t("log.skip_file", file_name=skipped.file_path.name, reason=self._task_skip_reason_text(skipped)))
         if result.add_result.added_count:
             self.on_log_text(self.t("log.tasks_added", count=result.add_result.added_count))
         self.on_log_text(self.t("log.restored_tasks", count=result.requested_count))
@@ -1014,7 +1014,7 @@ class MainWindow(QMainWindow):
             self,
             self.t("file_dialog.print_files"),
             str(self.root_dir),
-            "Supported Files (*.pdf *.jpg *.jpeg *.png *.tif *.tiff *.bmp)",
+            self.t("file_dialog.supported_files"),
         )
         self.add_files([Path(f) for f in files])
 
@@ -1029,17 +1029,14 @@ class MainWindow(QMainWindow):
         )
         self.refresh_task_table()
         for skipped in result.skipped:
-            self.on_log_text(self.t("log.skip_file", file_name=skipped.file_path.name, reason=self._task_skip_reason_text(skipped.reason)))
+            self.on_log_text(self.t("log.skip_file", file_name=skipped.file_path.name, reason=self._task_skip_reason_text(skipped)))
         if result.added_count:
             self.on_log_text(self.t("log.tasks_added", count=result.added_count))
 
-    def _task_skip_reason_text(self, reason: str) -> str:
-        translations = {
-            "文件不存在": self.t("task.skip.missing_file"),
-            "不支持的文件类型": self.t("task.skip.unsupported"),
-            "已在任务列表中": self.t("task.skip.duplicate"),
-        }
-        return translations.get(reason, reason)
+    def _task_skip_reason_text(self, skipped: SkippedTaskInput) -> str:
+        if skipped.reason_key:
+            return self.t(skipped.reason_key)
+        return skipped.reason
 
     def _task_status_text(self, status: str) -> str:
         status_text = (status or "").strip()
@@ -1074,7 +1071,10 @@ class MainWindow(QMainWindow):
         if status_text.startswith("Waiting printer "):
             return self.t("status.waiting_printer_detail", detail=status_text[len("Waiting printer "):])
         if status_text.startswith("Queue "):
-            return self.t("status.queue_detail", detail=status_text[len("Queue "):])
+            detail = status_text[len("Queue "):]
+            if detail.endswith(", pausing send"):
+                detail = detail[: -len(", pausing send")]
+            return self.t("status.queue_detail", detail=detail.strip())
         return translations.get(status_text, status_text)
 
     def _set_worker_status_item(self, row: int, status: str) -> None:
@@ -1226,7 +1226,7 @@ class MainWindow(QMainWindow):
 
         self.on_log_text(self.t("log.worker_group_loaded", group_name=self.current_worker_group, count=len(self.workers)))
         try:
-            self.worker_service.validate_workers(self.workers)
+            self.worker_service.validate_workers(self.workers, language=self.current_language())
         except WorkerValidationError as exc:
             self.worker_config_error = str(exc)
             self.on_log_text(self.t("log.worker_config_invalid", error=exc))
@@ -1335,7 +1335,7 @@ class MainWindow(QMainWindow):
             return
         self.save_worker_settings()
         try:
-            self.worker_service.validate_workers(self.workers)
+            self.worker_service.validate_workers(self.workers, language=self.current_language())
         except WorkerValidationError as exc:
             self.worker_config_error = str(exc)
             self.on_log_text(self.t("log.worker_config_invalid", error=exc))

@@ -41,3 +41,29 @@ class PrintEnvironmentTests(TestCase):
             self.assertIsNone(controller._thread)
             self.assertIsNone(controller._statistics_run_id)
             self.assertFalse(any((root / "statistics" / "pending_runs").glob("*.json")))
+
+    def test_queue_wait_status_is_language_neutral_for_gui_translation(self) -> None:
+        spooler = PrinterSpooler.__new__(PrinterSpooler)
+        spooler.language = "zh-Hans"
+        spooler._queue_waiting_states = {}
+        spooler._queue_pause_last_log_ts = {}
+        depths = iter([3, 0])
+        statuses: list[str] = []
+        logs: list[str] = []
+
+        def get_queue_depth(printer_name: str) -> int:
+            return next(depths)
+
+        spooler.get_queue_depth = get_queue_depth
+
+        with patch("printfarm.spooler.time.sleep"):
+            spooler.wait_until_queue_available(
+                "PrinterA",
+                3,
+                status_callback=statuses.append,
+                log_callback=logs.append,
+                language="zh-Hans",
+            )
+
+        self.assertEqual(statuses, ["Queue 3/3"])
+        self.assertEqual(logs, ["队列等待任务数 3 已达到上限 3，暂停该 Worker 发送。"])

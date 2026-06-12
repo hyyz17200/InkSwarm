@@ -89,7 +89,7 @@ class ConfigStore:
                         "output_icc": "",
                         "printui_restore_file": "",
                         "black_point_compensation": False,
-                        "notes": "示例预设",
+                        "notes": "default preset",
                     },
                     indent=2,
                     ensure_ascii=False,

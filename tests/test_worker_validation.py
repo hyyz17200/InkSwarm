@@ -50,6 +50,21 @@ class WorkerValidationTests(TestCase):
         with self.assertRaisesRegex(WorkerValidationError, "Worker name cannot be empty"):
             validate_unique_worker_names([worker("   ", "workers/blank")])
 
+    def test_worker_name_errors_can_localize_to_chinese(self) -> None:
+        with self.assertRaises(WorkerValidationError) as raised:
+            validate_unique_worker_names(
+                [
+                    worker("P07", "workers/P07-a"),
+                    worker("P07", "workers/P07-b"),
+                    worker("   ", "workers/blank"),
+                ],
+                language="zh-Hans",
+            )
+
+        message = str(raised.exception)
+        self.assertIn("Worker 名称重复 'P07'", message)
+        self.assertIn("Worker 名称不能为空", message)
+
     def test_run_service_blocks_duplicate_worker_names_before_snapshot(self) -> None:
         task = TaskItem(file_path=Path("job.pdf"), copies=1)
 
@@ -61,6 +76,19 @@ class WorkerValidationTests(TestCase):
                     worker("P07", "workers/P07-b"),
                 ],
                 settings={},
+            )
+
+    def test_run_service_worker_validation_uses_settings_language(self) -> None:
+        task = TaskItem(file_path=Path("job.pdf"), copies=1)
+
+        with self.assertRaisesRegex(WorkerValidationError, "Worker 名称重复 'P07'"):
+            RunService().prepare_start(
+                tasks=[task],
+                workers=[
+                    worker("P07", "workers/P07-a"),
+                    worker("P07", "workers/P07-b"),
+                ],
+                settings={"language": "zh-Hans"},
             )
 
 

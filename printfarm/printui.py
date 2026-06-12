@@ -42,14 +42,21 @@ def _printer_devmode(win32print: Any, handle: Any, level: int) -> Any:
     return info.get("pDevMode")
 
 
-def _driver_default_devmode(win32print: Any, win32con: Any, pywintypes: Any, handle: Any, printer_name: str) -> Any:
+def _driver_default_devmode(
+    win32print: Any,
+    win32con: Any,
+    pywintypes: Any,
+    handle: Any,
+    printer_name: str,
+    language: str = "en",
+) -> Any:
     size = win32print.DocumentProperties(0, handle, printer_name, None, None, 0)
     fixed_size = pywintypes.DEVMODEType().Size
     driver_extra = max(0, int(size) - int(fixed_size))
     devmode = pywintypes.DEVMODEType(driver_extra)
     result = win32print.DocumentProperties(0, handle, printer_name, devmode, None, win32con.DM_OUT_BUFFER)
     if result != getattr(win32con, "IDOK", 1):
-        raise RuntimeError(f"DocumentProperties returned {result}")
+        raise RuntimeError(translate(language, "printui.document_properties_failed", result=result))
     return devmode
 
 
@@ -63,9 +70,9 @@ def ensure_printer_defaults_initialized(printer_name: str, language: str = "en")
         import win32print  # type: ignore
     except ModuleNotFoundError as exc:
         missing = exc.name or str(exc)
-        raise RuntimeError(f"Windows printing dependency is missing: {missing}.") from exc
+        raise RuntimeError(translate(language, "printui.dependency_missing", missing=missing)) from exc
     except ImportError as exc:
-        raise RuntimeError(f"Windows printing dependencies failed to import: {exc}") from exc
+        raise RuntimeError(translate(language, "printui.dependency_import_failed", error=exc)) from exc
 
     handle = win32print.OpenPrinter(printer_name)
     try:
@@ -74,12 +81,12 @@ def ensure_printer_defaults_initialized(printer_name: str, language: str = "en")
             return False
         candidate = _printer_devmode(win32print, handle, 2)
         if _devmode_driver_data_size(candidate) <= 0:
-            candidate = _driver_default_devmode(win32print, win32con, pywintypes, handle, printer_name)
+            candidate = _driver_default_devmode(win32print, win32con, pywintypes, handle, printer_name, language=language)
     finally:
         win32print.ClosePrinter(handle)
 
     if _devmode_driver_data_size(candidate) <= 0:
-        raise RuntimeError("Could not read a complete printer default DEVMODE.")
+        raise RuntimeError(translate(language, "printui.devmode_incomplete"))
 
     access = getattr(win32print, "PRINTER_ACCESS_ADMINISTER", 4) | getattr(win32print, "PRINTER_ACCESS_USE", 8)
     try:
@@ -94,7 +101,7 @@ def ensure_printer_defaults_initialized(printer_name: str, language: str = "en")
                 win32con.DM_IN_BUFFER | win32con.DM_OUT_BUFFER,
             )
             if result != getattr(win32con, "IDOK", 1):
-                raise RuntimeError(f"DocumentProperties returned {result}")
+                raise RuntimeError(translate(language, "printui.document_properties_failed", result=result))
             win32print.SetPrinter(handle, 8, {"pDevMode": candidate}, 0)
         finally:
             win32print.ClosePrinter(handle)
