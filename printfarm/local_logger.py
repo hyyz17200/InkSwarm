@@ -18,6 +18,9 @@ class RegularLogFilter:
     def __init__(self) -> None:
         self._seen_once_keys: set[str] = set()
 
+    def reset(self) -> None:
+        self._seen_once_keys.clear()
+
     def should_write(self, text: str, once_key: str | None = None) -> bool:
         key = regular_log_once_key(text, once_key=once_key)
         if key is None:

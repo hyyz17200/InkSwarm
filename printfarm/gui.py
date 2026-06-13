@@ -58,7 +58,7 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 DEBUG_LOG_NAME = "debug.log"
 DEFAULT_WINDOW_WIDTH = 1450
 DEFAULT_WINDOW_HEIGHT = 940
@@ -1359,6 +1359,7 @@ class MainWindow(QMainWindow):
         self.spool_progress_bar.setValue(0)
         self._set_spool_progress_text(0)
         debug_log(f"start_run with options={prepared.run_options} tasks={[(t.file_name(), t.copies) for t in prepared.tasks]}")
+        self.regular_log_filter.reset()
         try:
             self.controller.start(prepared.tasks, prepared.workers, prepared.run_options)
         except Exception as exc:

@@ -23,6 +23,17 @@ class RegularLogFilterTests(TestCase):
             )
         )
 
+    def test_reset_allows_once_key_again(self) -> None:
+        log_filter = RegularLogFilter()
+
+        self.assertTrue(log_filter.should_write("first", once_key=QUEUE_LIMIT_LOG_KEY))
+        self.assertFalse(log_filter.should_write("second", once_key=QUEUE_LIMIT_LOG_KEY))
+
+        log_filter.reset()
+
+        self.assertTrue(log_filter.should_write("next run", once_key=QUEUE_LIMIT_LOG_KEY))
+        self.assertFalse(log_filter.should_write("same run repeat", once_key=QUEUE_LIMIT_LOG_KEY))
+
     def test_queue_limit_text_without_once_key_is_not_special_cased(self) -> None:
         log_filter = RegularLogFilter()
         message = "[12:00:00] INFO: WorkerA: Queue waiting jobs 3 reached limit 3; pausing this worker."
