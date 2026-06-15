@@ -104,8 +104,8 @@ class RendererImageRipPreshrinkTests(TestCase):
 
 class RenderCacheKeyTests(TestCase):
     @staticmethod
-    def _worker(directory: Path, name: str, input_icc: str = "", rendering_intent: str = "relative_colorimetric") -> WorkerConfig:
-        preset = PresetConfig(name="default", input_icc=input_icc, rendering_intent=rendering_intent)
+    def _worker(directory: Path, name: str, rendering_intent: str = "relative_colorimetric") -> WorkerConfig:
+        preset = PresetConfig(name="default", rendering_intent=rendering_intent)
         return WorkerConfig(
             name=name,
             directory=directory,
@@ -138,19 +138,23 @@ class RenderCacheKeyTests(TestCase):
             # The second worker reused the cache instead of rendering again.
             self.assertEqual(len(renderer.color_transform_input_sizes), 1)
 
-    def test_icc_content_change_invalidates_cache(self) -> None:
+    def test_cmyk_fallback_icc_content_change_invalidates_cache(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             image_path = root / "page.png"
             self._sample_image(image_path)
-            icc_path = root / "profile.icc"
+            icc_path = root / "fallback.icc"
             icc_path.write_bytes(b"profile-one")
-            renderer = RecordingRenderer(root / "cache")
-            current_worker = self._worker(root, "Alpha", input_icc="profile.icc")
+            current_worker = self._worker(root, "Alpha")
 
-            first = renderer.ensure_render_cache(TaskItem(file_path=image_path), current_worker)
+            # Fresh Renderer per call simulates a fresh per-run instance.
+            first = RecordingRenderer(root / "cache", cmyk_fallback_icc=str(icc_path)).ensure_render_cache(
+                TaskItem(file_path=image_path), current_worker
+            )
             icc_path.write_bytes(b"profile-two-different")
-            second = renderer.ensure_render_cache(TaskItem(file_path=image_path), current_worker)
+            second = RecordingRenderer(root / "cache", cmyk_fallback_icc=str(icc_path)).ensure_render_cache(
+                TaskItem(file_path=image_path), current_worker
+            )
 
             self.assertNotEqual(first.cache_dir, second.cache_dir)
 

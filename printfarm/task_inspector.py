@@ -33,12 +33,17 @@ def inspect_task_input(
     file_path: Path,
     preview_max_size: tuple[int, int] = (320, 320),
     language: str = "en",
+    cmyk_fallback_icc: Path | None = None,
 ) -> TaskInspection:
     language = normalize_language(language)
     suffix = file_path.suffix.lower()
     if suffix == ".pdf":
         return _inspect_pdf(file_path, preview_max_size, language)
-    return _inspect_image(file_path, preview_max_size, language)
+    return _inspect_image(file_path, preview_max_size, language, cmyk_fallback_icc)
+
+
+def _cmyk_fallback_available(cmyk_fallback_icc: Path | None) -> bool:
+    return cmyk_fallback_icc is not None and cmyk_fallback_icc.exists()
 
 
 def _inspect_pdf(file_path: Path, preview_max_size: tuple[int, int], language: str) -> TaskInspection:
@@ -66,12 +71,19 @@ def _inspect_pdf(file_path: Path, preview_max_size: tuple[int, int], language: s
         document.close()
 
 
-def _inspect_image(file_path: Path, preview_max_size: tuple[int, int], language: str) -> TaskInspection:
+def _inspect_image(
+    file_path: Path,
+    preview_max_size: tuple[int, int],
+    language: str,
+    cmyk_fallback_icc: Path | None = None,
+) -> TaskInspection:
     try:
         with Image.open(file_path) as image:
             mode = image.mode
             embedded_profile = image.info.get("icc_profile")
-            if mode == "CMYK" and not embedded_profile:
+            # CMYK can only be interpreted with an embedded profile or, failing
+            # that, the global CMYK fallback ICC. Reject only when neither exists.
+            if mode == "CMYK" and not embedded_profile and not _cmyk_fallback_available(cmyk_fallback_icc):
                 raise TaskInspectionError(translate(language, "task_inspector.cmyk_missing_icc"))
 
             dpi_x, dpi_y = get_image_dpi(image)

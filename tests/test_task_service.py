@@ -87,7 +87,7 @@ class TaskServiceAddFilesTests(TestCase):
             good.write_bytes(b"%PDF")
             bad.write_bytes(b"%PDF")
 
-            def inspect(path: Path, *, language: str = "en") -> TaskInspection:
+            def inspect(path: Path, *, language: str = "en", cmyk_fallback_icc: Path | None = None) -> TaskInspection:
                 if path == bad.resolve():
                     raise TaskInspectionError("broken pdf")
                 return TaskInspection(display_size_mm="10 x 10 mm", preview_bytes=b"preview")
@@ -156,3 +156,23 @@ class TaskInspectionLocalizationTests(TestCase):
                 inspect_task_input(image_path)
             with self.assertRaisesRegex(TaskInspectionError, "CMYK 文件没有嵌入 ICC"):
                 inspect_task_input(image_path, language="zh-Hans")
+
+    def test_cmyk_without_embedded_icc_is_accepted_when_fallback_is_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "cmyk.jpg"
+            Image.new("CMYK", (4, 4)).save(image_path)
+            fallback = Path(tmp) / "fallback.icc"
+            fallback.write_bytes(b"exists")
+
+            inspection = inspect_task_input(image_path, cmyk_fallback_icc=fallback)
+
+            self.assertIsInstance(inspection, TaskInspection)
+
+    def test_cmyk_without_embedded_icc_is_rejected_when_fallback_file_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "cmyk.jpg"
+            Image.new("CMYK", (4, 4)).save(image_path)
+            missing_fallback = Path(tmp) / "does-not-exist.icc"
+
+            with self.assertRaisesRegex(TaskInspectionError, "CMYK file has no embedded ICC"):
+                inspect_task_input(image_path, cmyk_fallback_icc=missing_fallback)

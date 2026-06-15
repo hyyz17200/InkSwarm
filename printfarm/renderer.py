@@ -67,6 +67,7 @@ class Renderer:
         target_orientation: str = "portrait",
         rip_limit_enabled: bool = True,
         rip_limit_ppi: int = 300,
+        cmyk_fallback_icc: str = "",
         language: str = "en",
     ):
         self.cache_root = cache_root.resolve()
@@ -75,6 +76,9 @@ class Renderer:
         self.target_orientation = (target_orientation or "portrait").lower()
         self.rip_limit_enabled = bool(rip_limit_enabled)
         self.rip_limit_ppi = max(36, int(rip_limit_ppi or 300))
+        # Global fallback ICC used only for CMYK input that has no usable embedded
+        # profile. RGB input falls back to sRGB instead, so this never affects RGB.
+        self.cmyk_fallback_icc_path = Path(cmyk_fallback_icc) if cmyk_fallback_icc else None
         self.language = normalize_language(language)
         # Per-run memo of source signatures. The controller builds a fresh
         # Renderer for each run, so the CRC of each source file is computed once
@@ -117,7 +121,7 @@ class Renderer:
                 "dpi": preset.dpi,
                 "rendering_intent": preset.rendering_intent,
                 "black_point_compensation": bool(preset.black_point_compensation),
-                "input_icc_sha256": key_payload["input_icc"],
+                "cmyk_fallback_icc_sha256": key_payload["cmyk_fallback_icc"],
                 "output_icc_sha256": key_payload["output_icc"],
                 "rip_limit_enabled": self.rip_limit_enabled,
                 "rip_limit_ppi": self.rip_limit_ppi,
@@ -138,21 +142,26 @@ class Renderer:
         """Build the render-cache identity.
 
         Only inputs that change the cached bitmap participate: the source file
-        signature, the color pipeline (both ICC profiles by content hash,
-        rendering intent, black point compensation), the raster resolution, and
-        the RIP/orientation options. Worker name, printer name, preset name/notes
-        and ICC *paths* are deliberately excluded so identically configured
-        workers share one cache.
+        signature, the color pipeline (the global CMYK fallback ICC and the
+        preset output ICC by content hash, rendering intent, black point
+        compensation), the raster resolution, and the RIP/orientation options.
+        Worker name, printer name, preset name/notes and ICC *paths* are
+        deliberately excluded so identically configured workers share one cache.
+
+        The CMYK fallback ICC only affects CMYK input without an embedded
+        profile, but its content hash participates for every input so that
+        changing the fallback in Settings is always detected. RGB and
+        embedded-profile inputs are then re-rendered unnecessarily on a fallback
+        change; that is a rare event and the simpler, always-correct trade-off.
         """
-        input_icc_path = worker.resolve_path(preset.input_icc) if preset.input_icc else None
         output_icc_path = worker.resolve_path(preset.output_icc) if preset.output_icc else None
         return {
-            "cache_schema": 2,
+            "cache_schema": 3,
             "source": self._source_signature(task.file_path),
             "dpi": int(preset.dpi),
             "rendering_intent": preset.rendering_intent,
             "black_point_compensation": bool(preset.black_point_compensation),
-            "input_icc": _icc_fingerprint(input_icc_path),
+            "cmyk_fallback_icc": _icc_fingerprint(self.cmyk_fallback_icc_path),
             "output_icc": _icc_fingerprint(output_icc_path),
             "auto_orient_enabled": self.auto_orient_enabled,
             "target_orientation": self.target_orientation,
@@ -357,6 +366,39 @@ class Renderer:
         debug_log(f"cache save path={out_path.name} px={image.width}x{image.height} mode={image.mode} format=PNG compress_level=0")
         image.save(out_path, format="PNG", compress_level=0, optimize=False)
 
+    def _open_embedded_profile(self, embedded_profile_bytes: bytes | None, context: str):
+        if not embedded_profile_bytes:
+            return None
+        try:
+            return ImageCms.getOpenProfile(BytesIO(embedded_profile_bytes))
+        except Exception as exc:
+            # An unreadable/corrupt embedded profile is treated as "no usable
+            # embedded profile" so the caller can fall back (sRGB for RGB, the
+            # configured CMYK fallback ICC for CMYK).
+            debug_exception(f"Renderer._open_embedded_profile[{context}]", exc)
+            return None
+
+    def _rgb_source_profile(self, embedded_profile_bytes: bytes | None, worker: WorkerConfig):
+        profile = self._open_embedded_profile(embedded_profile_bytes, f"{worker.name}:rgb-embedded")
+        if profile is not None:
+            return profile
+        return ImageCms.createProfile("sRGB")
+
+    def _cmyk_source_profile(self, embedded_profile_bytes: bytes | None, worker: WorkerConfig):
+        profile = self._open_embedded_profile(embedded_profile_bytes, f"{worker.name}:cmyk-embedded")
+        if profile is not None:
+            return profile
+        fallback = self.cmyk_fallback_icc_path
+        if fallback is not None and fallback.exists():
+            try:
+                return ImageCms.getOpenProfile(str(fallback))
+            except Exception as exc:
+                debug_exception(f"Renderer._cmyk_source_profile[{worker.name}:fallback]", exc)
+                raise RuntimeError(
+                    translate(self.language, "renderer.cmyk_fallback_icc_unreadable", path=fallback.name)
+                ) from exc
+        raise RuntimeError(translate(self.language, "renderer.cmyk_missing_icc", worker_name=worker.name))
+
     def _apply_color_transform(self, image: Image.Image, worker: WorkerConfig, preset: PresetConfig) -> Image.Image:
         source_mode = image.mode
         embedded_profile_bytes = image.info.get("icc_profile")
@@ -370,25 +412,14 @@ class Renderer:
             image = image.convert("RGB")
             source_mode = "RGB"
 
-        input_profile_path = worker.resolve_path(preset.input_icc) if preset.input_icc else None
         output_profile_path = worker.resolve_path(preset.output_icc) if preset.output_icc else None
 
-        debug_log(f"color transform start worker={worker.name} preset={preset.name} mode={source_mode} input_icc={'yes' if input_profile_path else 'no'} output_icc={'yes' if output_profile_path else 'no'}")
+        debug_log(f"color transform start worker={worker.name} preset={preset.name} mode={source_mode} cmyk_fallback_icc={'yes' if self.cmyk_fallback_icc_path else 'no'} output_icc={'yes' if output_profile_path else 'no'}")
 
-        if source_mode == "RGB":
-            if input_profile_path and input_profile_path.exists():
-                src_profile = ImageCms.getOpenProfile(str(input_profile_path))
-            elif embedded_profile_bytes:
-                src_profile = ImageCms.getOpenProfile(BytesIO(embedded_profile_bytes))
-            else:
-                src_profile = ImageCms.createProfile("sRGB")
-        elif source_mode == "CMYK":
-            if input_profile_path and input_profile_path.exists():
-                src_profile = ImageCms.getOpenProfile(str(input_profile_path))
-            elif embedded_profile_bytes:
-                src_profile = ImageCms.getOpenProfile(BytesIO(embedded_profile_bytes))
-            else:
-                raise RuntimeError(translate(self.language, "renderer.cmyk_missing_icc", worker_name=worker.name))
+        if source_mode == "CMYK":
+            src_profile = self._cmyk_source_profile(embedded_profile_bytes, worker)
+        elif source_mode == "RGB":
+            src_profile = self._rgb_source_profile(embedded_profile_bytes, worker)
         else:
             src_profile = ImageCms.createProfile("sRGB")
 

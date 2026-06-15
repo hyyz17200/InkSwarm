@@ -48,7 +48,7 @@ from .controller import PrintController
 from .cache_service import CacheService
 from .i18n import language_options, normalize_language, translate
 from .local_logger import LocalLogWriter, RegularLogFilter
-from .models import SUPPORTED_INPUT_SUFFIXES, TaskItem, TaskStatusMessage, WorkerConfig, WorkerStatusMessage
+from .models import SUPPORTED_INPUT_SUFFIXES, TaskItem, TaskStatusMessage, WorkerConfig, WorkerStatusMessage, resolve_icc_path
 from .run_service import RunService
 from .spooler_service import SpoolerMaintenance, SpoolerMaintenanceCancelled, run_elevated_spooler_maintenance
 from .statistics_writer import CSV_HEADER, MonthlyStatisticsWriter
@@ -58,7 +58,7 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.3.2"
+APP_VERSION = "0.3.3"
 DEBUG_LOG_NAME = "debug.log"
 DEFAULT_WINDOW_WIDTH = 1450
 DEFAULT_WINDOW_HEIGHT = 940
@@ -541,6 +541,37 @@ class MainWindow(QMainWindow):
         printer_defaults_checkbox.setChecked(bool(self.app_settings.get("printer_defaults_check_enabled", True)))
         form.addRow(self.t("settings.printer_defaults_check"), printer_defaults_checkbox)
 
+        cmyk_fallback_row = QWidget()
+        cmyk_fallback_layout = QHBoxLayout(cmyk_fallback_row)
+        cmyk_fallback_layout.setContentsMargins(0, 0, 0, 0)
+        cmyk_fallback_layout.setSpacing(6)
+        cmyk_fallback_edit = QLineEdit(str(self.app_settings.get("cmyk_fallback_icc", "") or ""))
+        cmyk_fallback_edit.setClearButtonEnabled(True)
+        cmyk_fallback_edit.setPlaceholderText(self.t("settings.cmyk_fallback_icc_hint"))
+        cmyk_fallback_browse = QPushButton(self.t("actions.browse"))
+
+        def _browse_cmyk_fallback_icc() -> None:
+            icc_dir = self.store.paths.icc_dir
+            icc_dir.mkdir(parents=True, exist_ok=True)
+            selected, _ = QFileDialog.getOpenFileName(
+                dialog,
+                self.t("file_dialog.select_cmyk_fallback_icc"),
+                str(icc_dir),
+                self.t("file_dialog.icc_files"),
+            )
+            if not selected:
+                return
+            selected_path = Path(selected)
+            try:
+                cmyk_fallback_edit.setText(str(selected_path.relative_to(icc_dir)))
+            except ValueError:
+                cmyk_fallback_edit.setText(str(selected_path))
+
+        cmyk_fallback_browse.clicked.connect(_browse_cmyk_fallback_icc)
+        cmyk_fallback_layout.addWidget(cmyk_fallback_edit, 1)
+        cmyk_fallback_layout.addWidget(cmyk_fallback_browse, 0)
+        form.addRow(self.t("settings.cmyk_fallback_icc"), cmyk_fallback_row)
+
         orient_enabled_checkbox = QCheckBox(self.t("status.enabled"))
         orient_enabled_checkbox.setChecked(bool(self.app_settings.get("auto_orient_enabled", False)))
         form.addRow(self.t("settings.auto_orient"), orient_enabled_checkbox)
@@ -620,6 +651,7 @@ class MainWindow(QMainWindow):
         self.app_settings["font_engine"] = str(font_engine_combo.currentData() or "auto")
         self.app_settings["ignore_margins"] = bool(ignore_margins_checkbox.isChecked())
         self.app_settings["printer_defaults_check_enabled"] = bool(printer_defaults_checkbox.isChecked())
+        self.app_settings["cmyk_fallback_icc"] = cmyk_fallback_edit.text().strip()
         self.app_settings["auto_orient_enabled"] = bool(orient_enabled_checkbox.isChecked())
         self.app_settings["target_orientation"] = str(orientation_combo.currentData())
         self.app_settings["worker_queue_limit_enabled"] = bool(queue_limit_enabled_checkbox.isChecked())
@@ -986,7 +1018,11 @@ class MainWindow(QMainWindow):
         self.reload_workers()
 
     def restore_task_session(self) -> None:
-        result = self.task_service.restore_saved_tasks(self.tasks, language=self.current_language())
+        result = self.task_service.restore_saved_tasks(
+            self.tasks,
+            language=self.current_language(),
+            cmyk_fallback_icc=self._cmyk_fallback_icc_path(),
+        )
         if result.requested_count <= 0:
             return
         self.refresh_task_table()
@@ -1026,6 +1062,7 @@ class MainWindow(QMainWindow):
             files,
             default_copies=self.task_copies_value_box.value(),
             language=self.current_language(),
+            cmyk_fallback_icc=self._cmyk_fallback_icc_path(),
         )
         self.refresh_task_table()
         for skipped in result.skipped:
@@ -1255,6 +1292,9 @@ class MainWindow(QMainWindow):
     def _printer_defaults_check_enabled(self) -> bool:
         return bool(self.app_settings.get("printer_defaults_check_enabled", True))
 
+    def _cmyk_fallback_icc_path(self) -> Path | None:
+        return resolve_icc_path(self.store.paths.icc_dir, str(self.app_settings.get("cmyk_fallback_icc", "") or ""))
+
     def _restore_worker_preset_if_any(self, worker: WorkerConfig) -> None:
         message = self.worker_service.restore_preset_if_any(
             worker,
@@ -1353,7 +1393,12 @@ class MainWindow(QMainWindow):
             return
         self.task_service.reset_for_run(self.tasks)
         self.refresh_task_table()
-        prepared = self.run_service.prepare_start(self.tasks, self.workers, self.app_settings)
+        prepared = self.run_service.prepare_start(
+            self.tasks,
+            self.workers,
+            self.app_settings,
+            icc_dir=self.store.paths.icc_dir,
+        )
         self._spool_total = prepared.spool_total
         self.spool_progress_bar.setRange(0, max(1, self._spool_total))
         self.spool_progress_bar.setValue(0)

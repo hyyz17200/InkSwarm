@@ -70,7 +70,6 @@ class PresetConfig:
     dpi: int = 300
     fit_mode: str = "actual"
     rendering_intent: str = "relative_colorimetric"
-    input_icc: str = ""
     output_icc: str = ""
     printui_restore_file: str = ""
     black_point_compensation: bool = False
@@ -85,7 +84,6 @@ class PresetConfig:
             dpi=int(data.get("dpi", 300)),
             fit_mode=data.get("fit_mode", "actual"),
             rendering_intent=data.get("rendering_intent", "relative_colorimetric"),
-            input_icc=data.get("input_icc", ""),
             output_icc=data.get("output_icc", ""),
             printui_restore_file=data.get("printui_restore_file", ""),
             black_point_compensation=bool(data.get("black_point_compensation", False)),
@@ -99,7 +97,6 @@ class PresetConfig:
             "dpi": self.dpi,
             "fit_mode": self.fit_mode,
             "rendering_intent": self.rendering_intent,
-            "input_icc": self.input_icc,
             "output_icc": self.output_icc,
             "printui_restore_file": self.printui_restore_file,
             "black_point_compensation": self.black_point_compensation,
@@ -199,6 +196,7 @@ class RunOptions:
     rip_limit_enabled: bool = True
     rip_limit_ppi: int = DEFAULT_RASTER_DPI
     printer_defaults_check_enabled: bool = True
+    cmyk_fallback_icc: str = ""
     language: str = "en"
 
 
@@ -211,6 +209,7 @@ class AppPaths:
     statistics_dir: Path
     preview_dir: Path
     settings_file: Path
+    icc_dir: Path
 
 
 @dataclass
@@ -272,3 +271,20 @@ def file_content_crc32(path: Path, chunk_size: int = 1 << 20) -> int:
 
 def normalize_path_text(value: str) -> str:
     return os.path.normpath(value)
+
+
+def resolve_icc_path(icc_dir: Path, value: str) -> Path | None:
+    """Resolve a configured ICC file name to an absolute path under ``icc_dir``.
+
+    A bare file name (the normal case, entered in Settings) resolves inside the
+    program's ``icc`` directory; an absolute path is honored as-is. An empty
+    value means "no profile configured" and maps to ``None``. Existence is not
+    checked here — callers decide what an unavailable file means.
+    """
+    name = (value or "").strip()
+    if not name:
+        return None
+    candidate = Path(name)
+    if candidate.is_absolute():
+        return candidate
+    return icc_dir / candidate

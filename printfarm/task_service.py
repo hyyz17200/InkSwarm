@@ -39,6 +39,7 @@ class TaskService:
         files: Iterable[Path],
         default_copies: int = 1,
         language: str = "en",
+        cmyk_fallback_icc: Path | None = None,
     ) -> AddTasksResult:
         language = normalize_language(language)
         result = AddTasksResult()
@@ -74,7 +75,7 @@ class TaskService:
                 )
                 continue
             try:
-                inspection = inspect_task_input(resolved, language=language)
+                inspection = inspect_task_input(resolved, language=language, cmyk_fallback_icc=cmyk_fallback_icc)
             except TaskInspectionError as exc:
                 result.skipped.append(SkippedTaskInput(resolved, str(exc)))
                 continue
@@ -87,7 +88,12 @@ class TaskService:
             result.added_count += 1
         return result
 
-    def restore_saved_tasks(self, tasks: list[TaskItem], language: str = "en") -> RestoreTasksResult:
+    def restore_saved_tasks(
+        self,
+        tasks: list[TaskItem],
+        language: str = "en",
+        cmyk_fallback_icc: Path | None = None,
+    ) -> RestoreTasksResult:
         session_items = self.store.load_task_session()
         if not session_items:
             return RestoreTasksResult()
@@ -105,7 +111,7 @@ class TaskService:
             copies_map[resolved] = max(1, int(item.get("copies", 1)))
             enabled_map[resolved] = bool(item.get("enabled", True))
 
-        add_result = self.add_files(tasks, files_to_add, language=language)
+        add_result = self.add_files(tasks, files_to_add, language=language, cmyk_fallback_icc=cmyk_fallback_icc)
         for task in tasks:
             resolved = task.file_path.resolve()
             task.copies = copies_map.get(resolved, task.copies)

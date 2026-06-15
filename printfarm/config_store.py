@@ -17,11 +17,13 @@ class ConfigStore:
             statistics_dir=(root / "statistics").resolve(),
             preview_dir=(root / "cache" / "previews").resolve(),
             settings_file=(root / "app_settings.json").resolve(),
+            icc_dir=(root / "icc").resolve(),
         )
         self.paths.cache_dir.mkdir(parents=True, exist_ok=True)
         self.paths.logs_dir.mkdir(parents=True, exist_ok=True)
         self.paths.statistics_dir.mkdir(parents=True, exist_ok=True)
         self.paths.preview_dir.mkdir(parents=True, exist_ok=True)
+        self.paths.icc_dir.mkdir(parents=True, exist_ok=True)
         self.task_session_file = (self.paths.root / "task_session.json").resolve()
 
     def default_group_dir(self) -> Path:
@@ -85,7 +87,6 @@ class ConfigStore:
                         "dpi": 300,
                         "fit_mode": "actual",
                         "rendering_intent": "relative_colorimetric",
-                        "input_icc": "",
                         "output_icc": "",
                         "printui_restore_file": "",
                         "black_point_compensation": False,
@@ -164,6 +165,7 @@ class ConfigStore:
             "rip_limit_enabled": True,
             "rip_limit_ppi": 300,
             "printer_defaults_check_enabled": True,
+            "cmyk_fallback_icc": "",
             "font_engine": "auto",
             "language": "en",
             "task_default_copies": 1,
