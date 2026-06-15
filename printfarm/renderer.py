@@ -399,6 +399,47 @@ class Renderer:
                 ) from exc
         raise RuntimeError(translate(self.language, "renderer.cmyk_missing_icc", worker_name=worker.name))
 
+    def _open_rgb_output_profile(self, output_profile_path: Path, worker: WorkerConfig):
+        if not output_profile_path.exists():
+            raise RuntimeError(
+                translate(
+                    self.language,
+                    "renderer.output_icc_missing",
+                    worker_name=worker.name,
+                    path=output_profile_path,
+                )
+            )
+        try:
+            profile = ImageCms.getOpenProfile(str(output_profile_path))
+        except Exception as exc:
+            debug_exception(f"Renderer._open_rgb_output_profile[{worker.name}]", exc)
+            raise RuntimeError(
+                translate(
+                    self.language,
+                    "renderer.output_icc_unreadable",
+                    worker_name=worker.name,
+                    path=output_profile_path.name,
+                )
+            ) from exc
+        color_space = self._profile_color_space(profile)
+        if color_space != "RGB":
+            raise RuntimeError(
+                translate(
+                    self.language,
+                    "renderer.output_icc_not_rgb",
+                    worker_name=worker.name,
+                    path=output_profile_path.name,
+                    color_space=color_space or "?",
+                )
+            )
+        return profile
+
+    @staticmethod
+    def _profile_color_space(profile: Any) -> str:
+        cms_profile = getattr(profile, "profile", profile)
+        raw = getattr(cms_profile, "xcolor_space", "") or ""
+        return str(raw).strip().upper()
+
     def _apply_color_transform(self, image: Image.Image, worker: WorkerConfig, preset: PresetConfig) -> Image.Image:
         source_mode = image.mode
         embedded_profile_bytes = image.info.get("icc_profile")
@@ -432,12 +473,15 @@ class Renderer:
             flags |= cast(Any, bpc_flag)
 
         working_image = image.convert("CMYK" if source_mode == "CMYK" else "RGB")
+        # The output is always rasterized to an RGB DIB and handed to the Windows
+        # GDI printer DC, so the output (printer) ICC must describe an RGB device
+        # space. A CMYK/Gray/Lab output profile would silently produce wrong color,
+        # so reject it up front with a clear message instead.
         if not output_profile_path:
             dst_profile = ImageCms.createProfile("sRGB")
-            output_mode = "RGB"
         else:
-            dst_profile = ImageCms.getOpenProfile(str(output_profile_path))
-            output_mode = "RGB"
+            dst_profile = self._open_rgb_output_profile(output_profile_path, worker)
+        output_mode = "RGB"
 
         rendered = ImageCms.profileToProfile(
             working_image,
