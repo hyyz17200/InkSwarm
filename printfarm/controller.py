@@ -290,6 +290,7 @@ class PrintController:
         self._statistics_writer = MonthlyStatisticsWriter(statistics_root or (cache_root.parent / "statistics"))
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._runtimes: list[WorkerRuntime] = []
         self._pause_gate = _PauseGate()
         self._lock = threading.Lock()
         self._spool_activity = threading.Condition()
@@ -305,7 +306,13 @@ class PrintController:
         self._flush_pending_statistics("startup", emit_log=False)
 
     def is_running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+        if self._thread is not None and self._thread.is_alive():
+            return True
+        # A run is also considered active while any worker thread from the
+        # current run is still alive (e.g. finishing an uninterruptible GDI
+        # page submit after a stop). This prevents a new run from starting and
+        # resurrecting a leftover worker via a recycled stop event.
+        return any(runtime.is_alive() for runtime in self._runtimes)
 
     def is_paused(self) -> bool:
         return self._pause_gate.is_paused()
@@ -325,7 +332,10 @@ class PrintController:
         self._language = options.language
         self.validate_environment(language=options.language)
         self._flush_pending_statistics("start")
-        self._stop_event.clear()
+        # Use a fresh stop event per run instead of clearing a shared one, so
+        # that any leftover worker from a previous run keeps watching its own
+        # (still-set) event and cannot be silently un-stopped by a new run.
+        self._stop_event = threading.Event()
         self._set_paused(False, emit=False)
         run_started_at = time.time()
         self._statistics_run_id = self._statistics_writer.new_run_id()
@@ -395,6 +405,9 @@ class PrintController:
             self.signals.pause_state.emit(paused)
 
     def _run(self, tasks: list[TaskItem], workers: list[WorkerConfig], run_options: RunOptions) -> None:
+        # Bind this run's stop event locally so a later start() that replaces
+        # self._stop_event cannot change which event this run reacts to.
+        stop_event = self._stop_event
         scheduler = WeightedScheduler()
         renderer = Renderer(
             self._cache_root,
@@ -408,6 +421,7 @@ class PrintController:
         )
         queues: dict[str, queue.Queue[WorkerTaskBatch | None]] = {}
         runtimes: list[WorkerRuntime] = []
+        self._runtimes = runtimes
         printer_access = PrinterAccessCoordinator(language=run_options.language)
         active_workers = [worker for worker in workers if worker.enabled and worker.printer_name.strip()]
         tail_coordinator = (
@@ -436,7 +450,7 @@ class PrintController:
                     progress_callback=self._record_progress,
                     spool_send_start_callback=self._begin_spool_send,
                     spool_send_end_callback=self._end_spool_send,
-                    stop_event=self._stop_event,
+                    stop_event=stop_event,
                     pause_gate=self._pause_gate,
                     run_options=run_options,
                     tail_coordinator=tail_coordinator,
@@ -445,9 +459,9 @@ class PrintController:
                 runtimes.append(runtime)
 
             for task in tasks:
-                if self._stop_event.is_set():
+                if stop_event.is_set():
                     break
-                if not self._pause_gate.wait_if_paused(self._stop_event):
+                if not self._pause_gate.wait_if_paused(stop_event):
                     break
                 started_at = time.time()
                 self._task_started_at.setdefault(task.task_id, started_at)
@@ -464,7 +478,7 @@ class PrintController:
                 summary = ", ".join(f"{batch.worker_name}×{batch.copies}" for batch in batches)
                 self.signals.task_status.emit(TaskStatusMessage(task.task_id, "Queued", assigned_summary=summary))
                 for batch in batches:
-                    if not self._pause_gate.wait_if_paused(self._stop_event):
+                    if not self._pause_gate.wait_if_paused(stop_event):
                         break
                     if tail_coordinator is not None:
                         tail_coordinator.add_batch(batch)
@@ -481,7 +495,7 @@ class PrintController:
                             ),
                         )
                     )
-                if self._stop_event.is_set():
+                if stop_event.is_set():
                     break
 
             if tail_coordinator is not None:
