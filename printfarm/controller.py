@@ -552,6 +552,9 @@ class PrintController:
         file_name = self._task_file_names.get(task_id, task_id)
         run_id = self._statistics_run_id
         if run_id is not None:
+            # Synchronous per-copy statistics write (one fsync per copy, serialized
+            # across workers by the writer's lock). Intentionally not batched/offloaded;
+            # see MonthlyStatisticsWriter.record_success for the trade-off rationale.
             try:
                 self._statistics_writer.record_success(
                     run_id=run_id,
