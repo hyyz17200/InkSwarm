@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 import sys
 import threading
@@ -14,9 +15,22 @@ from .i18n import normalize_language, translate
 Image.MAX_IMAGE_PIXELS = None
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
+# When a job prints more than one copy, the page bitmaps are decoded once and the
+# resulting Windows DIBs are reused for every copy instead of re-decoding the
+# cache file each time. Holding all pages of a document in memory is the trade-off
+# for that; above this estimated budget we fall back to per-copy streaming so a
+# large multi-page document cannot exhaust memory. Sized in decoded bytes (~4 B/px).
+PREDECODE_MAX_BYTES = 1024 * 1024 * 1024
+
 win32ui: Any = None
 win32con: Any = None
 win32print: Any = None
+
+
+@dataclass
+class _PreparedPage:
+    dib: Any
+    page_spec: dict
 
 
 class PrinterSpooler:
@@ -104,22 +118,73 @@ class PrinterSpooler:
         before_send: Callable[[], None] | None = None,
         after_send: Callable[[], None] | None = None,
     ) -> None:
-        for copy_index in range(copies):
-            if before_each_copy is not None:
-                if before_each_copy(copy_index + 1, copies) is False:
-                    break
-            effective_name = f"{job_name} [copy {copy_index + 1}/{copies}]"
-            debug_log(f"spooler print start printer={printer_name} job={effective_name} pages={len(page_paths)} ignore_margins={ignore_margins}")
-            if before_send is not None:
-                before_send()
+        # Each copy is a separate print job, so the page bitmaps would otherwise be
+        # re-decoded once per copy. For multi-copy jobs decode them once up front and
+        # reuse the DIBs across copies; single-copy jobs decode on demand.
+        prepared = self._prepare_pages(page_paths, page_specs) if copies > 1 else None
+        try:
+            for copy_index in range(copies):
+                if before_each_copy is not None:
+                    if before_each_copy(copy_index + 1, copies) is False:
+                        break
+                effective_name = f"{job_name} [copy {copy_index + 1}/{copies}]"
+                debug_log(f"spooler print start printer={printer_name} job={effective_name} pages={len(page_paths)} ignore_margins={ignore_margins} predecoded={prepared is not None}")
+                if before_send is not None:
+                    before_send()
+                try:
+                    if prepared is not None:
+                        self._print_prepared_job(printer_name, prepared, effective_name, ignore_margins=ignore_margins)
+                    else:
+                        self._print_single_job(printer_name, page_paths, page_specs, effective_name, ignore_margins=ignore_margins)
+                finally:
+                    if after_send is not None:
+                        after_send()
+                debug_log(f"spooler print end printer={printer_name} job={effective_name}")
+                if after_each_copy is not None:
+                    after_each_copy(copy_index + 1, copies)
+        finally:
+            prepared = None  # release the held DIBs promptly
+
+    def _prepare_pages(self, page_paths: list[Path], page_specs: list[dict]) -> list[_PreparedPage] | None:
+        """Decode every page once into reusable DIBs, or None if too large to hold.
+
+        Returning None makes the caller fall back to per-copy streaming, keeping
+        peak memory at one page regardless of document size.
+        """
+        prepared: list[_PreparedPage] = []
+        total_bytes = 0
+        for page_path, page_spec in zip(page_paths, page_specs):
+            with Image.open(page_path) as opened:
+                image = opened.convert("RGB")
+                image.load()
+            total_bytes += image.width * image.height * 4
+            if total_bytes > PREDECODE_MAX_BYTES:
+                debug_log(f"spooler predecode skipped pages>{len(prepared)} est_bytes={total_bytes} cap={PREDECODE_MAX_BYTES}; streaming per copy")
+                return None
+            prepared.append(_PreparedPage(dib=ImageWin.Dib(image), page_spec=page_spec))
+        debug_log(f"spooler predecode pages={len(prepared)} est_bytes={total_bytes}")
+        return prepared
+
+    def _print_prepared_job(self, printer_name: str, prepared: list[_PreparedPage], job_name: str, ignore_margins: bool = True) -> None:
+        dc = win32ui.CreateDC()
+        dc.CreatePrinterDC(printer_name)
+        try:
+            dc.StartDoc(job_name)
+            for page in prepared:
+                dc.StartPage()
+                rect = self._compute_draw_rect(dc, page.page_spec, ignore_margins=ignore_margins)
+                page.dib.draw(dc.GetHandleOutput(), rect)
+                dc.EndPage()
+            dc.EndDoc()
+        except Exception as exc:
+            debug_exception(f"PrinterSpooler._print_prepared_job[{printer_name}:{job_name}]", exc)
             try:
-                self._print_single_job(printer_name, page_paths, page_specs, effective_name, ignore_margins=ignore_margins)
-            finally:
-                if after_send is not None:
-                    after_send()
-            debug_log(f"spooler print end printer={printer_name} job={effective_name}")
-            if after_each_copy is not None:
-                after_each_copy(copy_index + 1, copies)
+                dc.AbortDoc()
+            except Exception:
+                pass
+            raise
+        finally:
+            dc.DeleteDC()
 
     def _print_single_job(self, printer_name: str, page_paths: list[Path], page_specs: list[dict], job_name: str, ignore_margins: bool = True) -> None:
         dc = win32ui.CreateDC()
@@ -145,6 +210,10 @@ class PrinterSpooler:
             dc.DeleteDC()
 
     def _draw_image_actual_size(self, dc, image: Image.Image, page_spec: dict, ignore_margins: bool = True) -> None:
+        rect = self._compute_draw_rect(dc, page_spec, ignore_margins=ignore_margins)
+        ImageWin.Dib(image).draw(dc.GetHandleOutput(), rect)
+
+    def _compute_draw_rect(self, dc, page_spec: dict, ignore_margins: bool = True) -> tuple[int, int, int, int]:
         physical_width = dc.GetDeviceCaps(win32con.PHYSICALWIDTH)
         physical_height = dc.GetDeviceCaps(win32con.PHYSICALHEIGHT)
         printable_width = dc.GetDeviceCaps(win32con.HORZRES)
@@ -188,5 +257,4 @@ class PrinterSpooler:
             f"dst={dst_w}x{dst_h} rect=({left},{top},{right},{bottom})"
         )
 
-        dib = ImageWin.Dib(image)
-        dib.draw(dc.GetHandleOutput(), (left, top, right, bottom))
+        return left, top, right, bottom

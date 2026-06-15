@@ -403,6 +403,7 @@ class PrintController:
             rip_limit_enabled=run_options.rip_limit_enabled,
             rip_limit_ppi=run_options.rip_limit_ppi,
             cmyk_fallback_icc=run_options.cmyk_fallback_icc,
+            cache_image_format=run_options.cache_image_format,
             language=run_options.language,
         )
         queues: dict[str, queue.Queue[WorkerTaskBatch | None]] = {}

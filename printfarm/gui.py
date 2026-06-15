@@ -48,7 +48,19 @@ from .controller import PrintController
 from .cache_service import CacheService
 from .i18n import language_options, normalize_language, translate
 from .local_logger import LocalLogWriter, RegularLogFilter
-from .models import SUPPORTED_INPUT_SUFFIXES, TaskItem, TaskStatusMessage, WorkerConfig, WorkerStatusMessage, resolve_icc_path
+from .models import (
+    CACHE_FORMAT_PNG_L1,
+    CACHE_FORMAT_TIFF_DEFLATE,
+    CACHE_FORMAT_TIFF_NONE,
+    CACHE_IMAGE_FORMATS,
+    SUPPORTED_INPUT_SUFFIXES,
+    TaskItem,
+    TaskStatusMessage,
+    WorkerConfig,
+    WorkerStatusMessage,
+    normalize_cache_image_format,
+    resolve_icc_path,
+)
 from .run_service import RunService
 from .spooler_service import SpoolerMaintenance, SpoolerMaintenanceCancelled, run_elevated_spooler_maintenance
 from .statistics_writer import CSV_HEADER, MonthlyStatisticsWriter
@@ -58,7 +70,7 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.3.3"
+APP_VERSION = "0.3.4"
 DEBUG_LOG_NAME = "debug.log"
 DEFAULT_WINDOW_WIDTH = 1450
 DEFAULT_WINDOW_HEIGHT = 940
@@ -621,6 +633,21 @@ class MainWindow(QMainWindow):
         rip_limit_enabled_checkbox.toggled.connect(rip_limit_spin.setEnabled)
         form.addRow(self.t("settings.max_ppi"), rip_limit_spin)
 
+        cache_format_combo = QComboBox()
+        cache_format_labels = {
+            CACHE_FORMAT_TIFF_DEFLATE: self.t("settings.cache_format.tiff_deflate"),
+            CACHE_FORMAT_TIFF_NONE: self.t("settings.cache_format.tiff_none"),
+            CACHE_FORMAT_PNG_L1: self.t("settings.cache_format.png_l1"),
+        }
+        for cache_format in CACHE_IMAGE_FORMATS:
+            cache_format_combo.addItem(cache_format_labels.get(cache_format, cache_format), cache_format)
+        cache_format_idx = cache_format_combo.findData(
+            normalize_cache_image_format(self.app_settings.get("cache_image_format"))
+        )
+        if cache_format_idx >= 0:
+            cache_format_combo.setCurrentIndex(cache_format_idx)
+        form.addRow(self.t("settings.cache_image_format"), cache_format_combo)
+
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -660,6 +687,7 @@ class MainWindow(QMainWindow):
         self.app_settings["tail_balance_idle_seconds"] = int(tail_balance_idle_spin.value())
         self.app_settings["rip_limit_enabled"] = bool(rip_limit_enabled_checkbox.isChecked())
         self.app_settings["rip_limit_ppi"] = int(rip_limit_spin.value())
+        self.app_settings["cache_image_format"] = normalize_cache_image_format(cache_format_combo.currentData())
         self.store.save_app_settings(self.app_settings)
         if not new_save_tasks:
             self.task_service.clear_session()

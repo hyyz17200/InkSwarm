@@ -4,7 +4,7 @@ from pathlib import Path
 import json
 from typing import Any, Iterable
 
-from .models import AppPaths, PresetConfig, TaskItem, WorkerConfig
+from .models import DEFAULT_CACHE_IMAGE_FORMAT, AppPaths, PresetConfig, TaskItem, WorkerConfig
 
 
 class ConfigStore:
@@ -166,6 +166,7 @@ class ConfigStore:
             "rip_limit_ppi": 300,
             "printer_defaults_check_enabled": True,
             "cmyk_fallback_icc": "",
+            "cache_image_format": DEFAULT_CACHE_IMAGE_FORMAT,
             "font_engine": "auto",
             "language": "en",
             "task_default_copies": 1,

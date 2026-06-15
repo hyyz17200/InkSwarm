@@ -22,6 +22,31 @@ INTENT_NAME_TO_PIL = {
 
 DEFAULT_RASTER_DPI = 300
 
+# Render-cache image formats. Chosen for fast I/O plus at least simple redundancy
+# compression. TIFF deflate is the recommended balance (fast encode/decode, ~10x
+# on real print content, never expands on incompressible data); TIFF none is the
+# fastest I/O with no compression; PNG L1 is the lightweight PNG option.
+CACHE_FORMAT_TIFF_DEFLATE = "TIFF_Deflate"
+CACHE_FORMAT_TIFF_NONE = "TIFF_NoCompression"
+CACHE_FORMAT_PNG_L1 = "PNG_L1"
+CACHE_IMAGE_FORMATS = (CACHE_FORMAT_TIFF_DEFLATE, CACHE_FORMAT_TIFF_NONE, CACHE_FORMAT_PNG_L1)
+DEFAULT_CACHE_IMAGE_FORMAT = CACHE_FORMAT_TIFF_DEFLATE
+
+
+def normalize_cache_image_format(value: object) -> str:
+    text = str(value or "").strip()
+    return text if text in CACHE_IMAGE_FORMATS else DEFAULT_CACHE_IMAGE_FORMAT
+
+
+def cache_image_format_spec(value: object) -> tuple[str, str, dict[str, Any]]:
+    """Map a cache-format choice to (file extension, PIL format, save kwargs)."""
+    fmt = normalize_cache_image_format(value)
+    if fmt == CACHE_FORMAT_PNG_L1:
+        return "png", "PNG", {"compress_level": 1, "optimize": False}
+    if fmt == CACHE_FORMAT_TIFF_NONE:
+        return "tif", "TIFF", {"compression": "none"}
+    return "tif", "TIFF", {"compression": "tiff_deflate"}
+
 
 @dataclass
 class TaskItem:
@@ -197,6 +222,7 @@ class RunOptions:
     rip_limit_ppi: int = DEFAULT_RASTER_DPI
     printer_defaults_check_enabled: bool = True
     cmyk_fallback_icc: str = ""
+    cache_image_format: str = DEFAULT_CACHE_IMAGE_FORMAT
     language: str = "en"
 
 

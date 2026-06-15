@@ -6,7 +6,7 @@ from typing import Any, Iterable
 import copy
 
 from .i18n import normalize_language
-from .models import RunOptions, TaskItem, WorkerConfig, resolve_icc_path
+from .models import RunOptions, TaskItem, WorkerConfig, normalize_cache_image_format, resolve_icc_path
 from .worker_service import validate_unique_worker_names
 
 
@@ -57,6 +57,7 @@ class RunService:
             rip_limit_ppi=int(settings.get("rip_limit_ppi", 300) or 300),
             printer_defaults_check_enabled=bool(settings.get("printer_defaults_check_enabled", True)),
             cmyk_fallback_icc=str(fallback_path) if fallback_path is not None else "",
+            cache_image_format=normalize_cache_image_format(settings.get("cache_image_format")),
             language=normalize_language(settings.get("language", "en")),
         )
 

@@ -13,14 +13,17 @@ from PIL import Image, ImageCms, ImageFile
 
 from .i18n import normalize_language, translate
 from .models import (
+    DEFAULT_CACHE_IMAGE_FORMAT,
     INTENT_NAME_TO_PIL,
     PresetConfig,
     RenderArtifact,
     TaskItem,
     WorkerConfig,
+    cache_image_format_spec,
     file_content_crc32,
     file_content_hash,
     file_signature,
+    normalize_cache_image_format,
     stable_hash,
 )
 from .debug_logger import debug_exception, debug_log
@@ -68,6 +71,7 @@ class Renderer:
         rip_limit_enabled: bool = True,
         rip_limit_ppi: int = 300,
         cmyk_fallback_icc: str = "",
+        cache_image_format: str = DEFAULT_CACHE_IMAGE_FORMAT,
         language: str = "en",
     ):
         self.cache_root = cache_root.resolve()
@@ -76,6 +80,13 @@ class Renderer:
         self.target_orientation = (target_orientation or "portrait").lower()
         self.rip_limit_enabled = bool(rip_limit_enabled)
         self.rip_limit_ppi = max(36, int(rip_limit_ppi or 300))
+        # Cached page bitmap format. The extension/format/kwargs are derived once
+        # and reused for every page save; the normalized name participates in the
+        # cache key so changing the format produces a fresh, separate cache.
+        self.cache_image_format = normalize_cache_image_format(cache_image_format)
+        self._cache_ext, self._cache_save_format, self._cache_save_kwargs = cache_image_format_spec(
+            self.cache_image_format
+        )
         # Global fallback ICC used only for CMYK input that has no usable embedded
         # profile. RGB input falls back to sRGB instead, so this never affects RGB.
         self.cmyk_fallback_icc_path = Path(cmyk_fallback_icc) if cmyk_fallback_icc else None
@@ -123,6 +134,7 @@ class Renderer:
                 "black_point_compensation": bool(preset.black_point_compensation),
                 "cmyk_fallback_icc_sha256": key_payload["cmyk_fallback_icc"],
                 "output_icc_sha256": key_payload["output_icc"],
+                "cache_image_format": self.cache_image_format,
                 "rip_limit_enabled": self.rip_limit_enabled,
                 "rip_limit_ppi": self.rip_limit_ppi,
                 "auto_orient_enabled": self.auto_orient_enabled,
@@ -156,7 +168,8 @@ class Renderer:
         """
         output_icc_path = worker.resolve_path(preset.output_icc) if preset.output_icc else None
         return {
-            "cache_schema": 3,
+            "cache_schema": 4,
+            "cache_image_format": self.cache_image_format,
             "source": self._source_signature(task.file_path),
             "dpi": int(preset.dpi),
             "rendering_intent": preset.rendering_intent,
@@ -247,7 +260,7 @@ class Renderer:
                         f"render pdf final worker={worker.name} preset={preset.name} page={index + 1} "
                         f"final_px={image.width}x{image.height} size_mm={width_mm:.3f}x{height_mm:.3f}"
                     )
-                    out_path = cache_dir / f"page_{index + 1:04d}.png"
+                    out_path = cache_dir / f"page_{index + 1:04d}.{self._cache_ext}"
                     self._save_cache_image(image, out_path)
                     page_info.append({
                         "file": out_path.name,
@@ -271,7 +284,7 @@ class Renderer:
                 f"render image final worker={worker.name} preset={preset.name} source={image_path.name} "
                 f"final_px={rendered.width}x{rendered.height} size_mm={width_mm:.3f}x{height_mm:.3f}"
             )
-            out_path = cache_dir / "page_0001.png"
+            out_path = cache_dir / f"page_0001.{self._cache_ext}"
             self._save_cache_image(rendered, out_path)
         return [{"file": out_path.name, "width_mm": round(width_mm, 3), "height_mm": round(height_mm, 3)}]
 
@@ -363,8 +376,11 @@ class Renderer:
     def _save_cache_image(self, image: Image.Image, out_path: Path) -> None:
         if "icc_profile" in image.info:
             image.info.pop("icc_profile", None)
-        debug_log(f"cache save path={out_path.name} px={image.width}x{image.height} mode={image.mode} format=PNG compress_level=0")
-        image.save(out_path, format="PNG", compress_level=0, optimize=False)
+        debug_log(
+            f"cache save path={out_path.name} px={image.width}x{image.height} mode={image.mode} "
+            f"format={self._cache_save_format} opts={self._cache_save_kwargs}"
+        )
+        image.save(out_path, format=self._cache_save_format, **self._cache_save_kwargs)
 
     def _open_embedded_profile(self, embedded_profile_bytes: bytes | None, context: str):
         if not embedded_profile_bytes:
