@@ -4,6 +4,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, TypedDict, cast
 import json
+import os
 import threading
 import time
 
@@ -11,7 +12,17 @@ import pypdfium2 as pdfium
 from PIL import Image, ImageCms, ImageFile
 
 from .i18n import normalize_language, translate
-from .models import INTENT_NAME_TO_PIL, PresetConfig, RenderArtifact, TaskItem, WorkerConfig, file_signature, stable_hash
+from .models import (
+    INTENT_NAME_TO_PIL,
+    PresetConfig,
+    RenderArtifact,
+    TaskItem,
+    WorkerConfig,
+    file_content_crc32,
+    file_content_hash,
+    file_signature,
+    stable_hash,
+)
 from .debug_logger import debug_exception, debug_log
 from .task_inspector import MM_PER_INCH, PDF_POINTS_PER_INCH, get_image_dpi
 
@@ -21,7 +32,25 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 PDF_RENDER_LOCKS: dict[str, threading.Lock] = {}
 PDF_RENDER_LOCKS_GUARD = threading.Lock()
+RENDER_KEY_LOCKS: dict[str, threading.Lock] = {}
+RENDER_KEY_LOCKS_GUARD = threading.Lock()
 IMAGE_RIP_PRESHRINK_FACTOR = 2.0
+
+
+def _icc_fingerprint(path: Path | None) -> str:
+    """Content hash for an ICC profile, used as part of the render-cache key.
+
+    Identity is based on ICC *content* rather than its path/filename, so workers
+    with the same model/ink/paper/ICC combination share one render cache even
+    when their preset files live in different directories. A missing or unset
+    profile maps to "" to match the renderer's fallback (no input/output ICC).
+    """
+    if path is None:
+        return ""
+    try:
+        return file_content_hash(path)
+    except OSError:
+        return ""
 
 
 class PageRenderInfo(TypedDict):
@@ -47,50 +76,141 @@ class Renderer:
         self.rip_limit_enabled = bool(rip_limit_enabled)
         self.rip_limit_ppi = max(36, int(rip_limit_ppi or 300))
         self.language = normalize_language(language)
+        # Per-run memo of source signatures. The controller builds a fresh
+        # Renderer for each run, so the CRC of each source file is computed once
+        # per run (source files do not change mid-run) and recomputed next run —
+        # which is what catches a same-size/same-mtime edit between runs.
+        self._source_signature_cache: dict[tuple[str, int, int], dict[str, Any]] = {}
+        self._source_signature_lock = threading.Lock()
 
     def ensure_render_cache(self, task: TaskItem, worker: WorkerConfig) -> RenderArtifact:
         preset = worker.get_active_preset()
-        key_payload = {
-            "source": file_signature(task.file_path),
-            "preset": preset.to_dict(),
-            "worker": worker.name,
-            "auto_orient_enabled": self.auto_orient_enabled,
-            "target_orientation": self.target_orientation,
-            "rip_limit_enabled": self.rip_limit_enabled,
-            "rip_limit_ppi": self.rip_limit_ppi,
-            "image_rip_preshrink_factor": IMAGE_RIP_PRESHRINK_FACTOR,
-        }
+        key_payload = self._cache_key_payload(task, worker, preset)
         key = stable_hash(key_payload)
         cache_dir = self.cache_root / key
-        meta_file = cache_dir / "metadata.json"
-        if meta_file.exists():
-            metadata = json.loads(meta_file.read_text(encoding="utf-8"))
-            page_paths = [cache_dir / page["file"] for page in metadata["pages"]]
-            if all(path.exists() for path in page_paths):
-                debug_log(f"renderer cache hit worker={worker.name} preset={preset.name} task={task.file_name()} key={key}")
-                return RenderArtifact(cache_dir=cache_dir, page_paths=page_paths, metadata=metadata)
 
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        debug_log(f"renderer cache miss worker={worker.name} preset={preset.name} task={task.file_name()} key={key}")
-        if task.file_path.suffix.lower() == ".pdf":
-            page_info = self._render_pdf(task.file_path, cache_dir, worker, preset)
-        else:
-            page_info = self._render_image_file(task.file_path, cache_dir, worker, preset)
+        artifact = self._load_cache_artifact(cache_dir)
+        if artifact is not None:
+            debug_log(f"renderer cache hit worker={worker.name} preset={preset.name} task={task.file_name()} key={key}")
+            return artifact
 
-        metadata = {
-            "source": str(task.file_path),
-            "preset_name": preset.name,
-            "worker_name": worker.name,
-            "dpi": preset.dpi,
-            "rip_limit_enabled": self.rip_limit_enabled,
-            "rip_limit_ppi": self.rip_limit_ppi,
+        # Identically configured workers resolve to the same key and therefore the
+        # same cache directory. Serialize per key so only one thread renders/writes
+        # it while the others wait and then read the finished result.
+        with self._get_render_key_lock(key):
+            artifact = self._load_cache_artifact(cache_dir)
+            if artifact is not None:
+                debug_log(f"renderer cache hit (shared) worker={worker.name} preset={preset.name} task={task.file_name()} key={key}")
+                return artifact
+
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            debug_log(f"renderer cache miss worker={worker.name} preset={preset.name} task={task.file_name()} key={key}")
+            if task.file_path.suffix.lower() == ".pdf":
+                page_info = self._render_pdf(task.file_path, cache_dir, worker, preset)
+            else:
+                page_info = self._render_image_file(task.file_path, cache_dir, worker, preset)
+
+            metadata = {
+                "source": str(task.file_path),
+                "preset_name": preset.name,
+                "worker_name": worker.name,
+                "dpi": preset.dpi,
+                "rendering_intent": preset.rendering_intent,
+                "black_point_compensation": bool(preset.black_point_compensation),
+                "input_icc_sha256": key_payload["input_icc"],
+                "output_icc_sha256": key_payload["output_icc"],
+                "rip_limit_enabled": self.rip_limit_enabled,
+                "rip_limit_ppi": self.rip_limit_ppi,
+                "auto_orient_enabled": self.auto_orient_enabled,
+                "target_orientation": self.target_orientation,
+                "image_rip_preshrink_factor": IMAGE_RIP_PRESHRINK_FACTOR,
+                "cache_schema": key_payload["cache_schema"],
+                "pages": page_info,
+            }
+            self._write_metadata_atomic(cache_dir / "metadata.json", metadata)
+            return RenderArtifact(
+                cache_dir=cache_dir,
+                page_paths=[cache_dir / p["file"] for p in page_info],
+                metadata=metadata,
+            )
+
+    def _cache_key_payload(self, task: TaskItem, worker: WorkerConfig, preset: PresetConfig) -> dict[str, Any]:
+        """Build the render-cache identity.
+
+        Only inputs that change the cached bitmap participate: the source file
+        signature, the color pipeline (both ICC profiles by content hash,
+        rendering intent, black point compensation), the raster resolution, and
+        the RIP/orientation options. Worker name, printer name, preset name/notes
+        and ICC *paths* are deliberately excluded so identically configured
+        workers share one cache.
+        """
+        input_icc_path = worker.resolve_path(preset.input_icc) if preset.input_icc else None
+        output_icc_path = worker.resolve_path(preset.output_icc) if preset.output_icc else None
+        return {
+            "cache_schema": 2,
+            "source": self._source_signature(task.file_path),
+            "dpi": int(preset.dpi),
+            "rendering_intent": preset.rendering_intent,
+            "black_point_compensation": bool(preset.black_point_compensation),
+            "input_icc": _icc_fingerprint(input_icc_path),
+            "output_icc": _icc_fingerprint(output_icc_path),
             "auto_orient_enabled": self.auto_orient_enabled,
             "target_orientation": self.target_orientation,
+            "rip_limit_enabled": self.rip_limit_enabled,
+            "rip_limit_ppi": self.rip_limit_ppi,
             "image_rip_preshrink_factor": IMAGE_RIP_PRESHRINK_FACTOR,
-            "pages": page_info,
         }
-        meta_file.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
-        return RenderArtifact(cache_dir=cache_dir, page_paths=[cache_dir / p["file"] for p in page_info], metadata=metadata)
+
+    def _source_signature(self, path: Path) -> dict[str, Any]:
+        """Source-file identity: path + size + mtime + a CRC32 of the content.
+
+        Size and mtime alone miss a content change that preserves both (e.g. a
+        timestamp-preserving copy/restore, or coarse filesystem mtime). Adding a
+        fast CRC32 closes that gap; combined with size and mtime an accidental
+        collision is effectively impossible. The CRC is memoized per run (see
+        __init__) so the file is read once per run rather than once per worker.
+        """
+        signature = file_signature(path)
+        memo_key = (str(signature["path"]), int(signature["size"]), int(signature["mtime_ns"]))
+        with self._source_signature_lock:
+            cached = self._source_signature_cache.get(memo_key)
+        if cached is not None:
+            return cached
+        # Computed outside the lock so a large source does not block other lookups.
+        signature["crc32"] = file_content_crc32(path)
+        with self._source_signature_lock:
+            existing = self._source_signature_cache.get(memo_key)
+            if existing is not None:
+                return existing
+            self._source_signature_cache[memo_key] = signature
+            return signature
+
+    def _load_cache_artifact(self, cache_dir: Path) -> RenderArtifact | None:
+        meta_file = cache_dir / "metadata.json"
+        if not meta_file.exists():
+            return None
+        try:
+            metadata = json.loads(meta_file.read_text(encoding="utf-8"))
+            page_paths = [cache_dir / page["file"] for page in metadata["pages"]]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if not page_paths or not all(path.exists() for path in page_paths):
+            return None
+        return RenderArtifact(cache_dir=cache_dir, page_paths=page_paths, metadata=metadata)
+
+    def _get_render_key_lock(self, key: str) -> threading.Lock:
+        with RENDER_KEY_LOCKS_GUARD:
+            lock = RENDER_KEY_LOCKS.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                RENDER_KEY_LOCKS[key] = lock
+            return lock
+
+    @staticmethod
+    def _write_metadata_atomic(meta_file: Path, metadata: dict[str, Any]) -> None:
+        tmp_file = meta_file.with_name(f"{meta_file.name}.tmp")
+        tmp_file.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp_file, meta_file)
 
     def _render_pdf(self, pdf_path: Path, cache_dir: Path, worker: WorkerConfig, preset: PresetConfig) -> list[PageRenderInfo]:
         page_info: list[PageRenderInfo] = []

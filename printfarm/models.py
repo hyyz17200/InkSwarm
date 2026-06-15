@@ -8,6 +8,7 @@ import json
 import os
 import time
 import uuid
+import zlib
 
 
 SUPPORTED_INPUT_SUFFIXES = {".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
@@ -251,6 +252,22 @@ def file_signature(path: Path) -> dict[str, Any]:
 def stable_hash(payload: dict[str, Any]) -> str:
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def file_content_hash(path: Path, chunk_size: int = 1 << 20) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def file_content_crc32(path: Path, chunk_size: int = 1 << 20) -> int:
+    crc = 0
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(chunk_size), b""):
+            crc = zlib.crc32(chunk, crc)
+    return crc & 0xFFFFFFFF
 
 
 def normalize_path_text(value: str) -> str:
