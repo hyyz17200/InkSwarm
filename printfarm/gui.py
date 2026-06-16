@@ -70,7 +70,7 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.3.7"
+APP_VERSION = "0.3.8"
 DEBUG_LOG_NAME = "debug.log"
 DEFAULT_WINDOW_WIDTH = 1450
 DEFAULT_WINDOW_HEIGHT = 940
@@ -616,6 +616,15 @@ class MainWindow(QMainWindow):
         queue_limit_enabled_checkbox.toggled.connect(queue_limit_spin.setEnabled)
         form.addRow(self.t("settings.max_queue_value"), queue_limit_spin)
 
+        queue_poll_spin = QSpinBox()
+        queue_poll_spin.setRange(1, 60)
+        queue_poll_spin.setSuffix(self.t("settings.seconds_suffix"))
+        queue_poll_spin.setValue(max(1, int(self.app_settings.get("queue_poll_seconds", 5) or 5)))
+        queue_poll_spin.setToolTip(self.t("settings.queue_poll_interval_tip"))
+        queue_poll_spin.setEnabled(queue_limit_enabled_checkbox.isChecked())
+        queue_limit_enabled_checkbox.toggled.connect(queue_poll_spin.setEnabled)
+        form.addRow(self.t("settings.queue_poll_interval"), queue_poll_spin)
+
         tail_balance_enabled_checkbox = QCheckBox(self.t("status.enabled"))
         tail_balance_enabled_checkbox.setChecked(bool(self.app_settings.get("tail_balance_enabled", False)))
         form.addRow(self.t("settings.tail_balance"), tail_balance_enabled_checkbox)
@@ -690,6 +699,7 @@ class MainWindow(QMainWindow):
         self.app_settings["target_orientation"] = str(orientation_combo.currentData())
         self.app_settings["worker_queue_limit_enabled"] = bool(queue_limit_enabled_checkbox.isChecked())
         self.app_settings["worker_queue_limit"] = int(queue_limit_spin.value())
+        self.app_settings["queue_poll_seconds"] = int(queue_poll_spin.value())
         self.app_settings["tail_balance_enabled"] = bool(tail_balance_enabled_checkbox.isChecked())
         self.app_settings["tail_balance_idle_seconds"] = int(tail_balance_idle_spin.value())
         self.app_settings["rip_limit_enabled"] = bool(rip_limit_enabled_checkbox.isChecked())

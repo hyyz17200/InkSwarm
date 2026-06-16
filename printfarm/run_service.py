@@ -51,6 +51,7 @@ class RunService:
             ignore_margins=bool(settings.get("ignore_margins", True)),
             worker_queue_limit_enabled=bool(settings.get("worker_queue_limit_enabled", False)),
             worker_queue_limit=int(settings.get("worker_queue_limit", 3) or 3),
+            queue_poll_seconds=max(1.0, float(settings.get("queue_poll_seconds", 5) or 5)),
             tail_balance_enabled=bool(settings.get("tail_balance_enabled", False)),
             tail_balance_idle_seconds=max(1, int(settings.get("tail_balance_idle_seconds", 15) or 15)),
             rip_limit_enabled=bool(settings.get("rip_limit_enabled", True)),

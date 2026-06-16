@@ -160,6 +160,7 @@ class ConfigStore:
             "ignore_margins": True,
             "worker_queue_limit_enabled": False,
             "worker_queue_limit": 3,
+            "queue_poll_seconds": 5,
             "tail_balance_enabled": False,
             "tail_balance_idle_seconds": 15,
             "rip_limit_enabled": True,

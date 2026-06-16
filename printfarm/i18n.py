@@ -135,6 +135,11 @@ _TRANSLATIONS: Mapping[str, Mapping[str, str]] = {
         "settings.language": "Language",
         "settings.max_ppi": "Max PPI",
         "settings.max_queue_value": "Max queue value",
+        "settings.queue_poll_interval": "Queue poll interval",
+        "settings.queue_poll_interval_tip": (
+            "How often each worker re-checks its printer's Windows spooler queue while the worker max queue "
+            "jobs limit is throttling it. Only takes effect when the worker max queue jobs limit is enabled."
+        ),
         "settings.orientation.landscape": "Landscape",
         "settings.orientation.portrait": "Portrait",
         "settings.printer_defaults_check": "Initialize printer defaults check",
@@ -398,6 +403,11 @@ _TRANSLATIONS: Mapping[str, Mapping[str, str]] = {
         "settings.language": "语言",
         "settings.max_ppi": "最大 PPI",
         "settings.max_queue_value": "最大排队值",
+        "settings.queue_poll_interval": "队列轮询间隔",
+        "settings.queue_poll_interval_tip": (
+            "当启用“Worker 最大排队数”并触发限流时，每个 Worker 重新检查该打印机 Windows 队列深度的间隔。"
+            "仅在启用 Worker 最大排队数限制时生效。"
+        ),
         "settings.orientation.landscape": "横向",
         "settings.orientation.portrait": "纵向",
         "settings.printer_defaults_check": "初始化打印默认值检查",
