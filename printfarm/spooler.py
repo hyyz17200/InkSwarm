@@ -7,13 +7,14 @@ import threading
 import time
 from typing import Any, Callable
 
-from PIL import Image, ImageFile, ImageWin
+from PIL import Image, ImageWin
 
 from .debug_logger import debug_exception, debug_log
 from .i18n import normalize_language, translate
 
 Image.MAX_IMAGE_PIXELS = None
-ImageFile.LOAD_TRUNCATED_IMAGES = True
+# Do NOT enable ImageFile.LOAD_TRUNCATED_IMAGES: incomplete or corrupt bitmaps must
+# raise during decode so they are rejected, never printed as partial output.
 
 # When a job prints more than one copy, the page bitmaps are decoded once and the
 # resulting Windows DIBs are reused for every copy instead of re-decoding the

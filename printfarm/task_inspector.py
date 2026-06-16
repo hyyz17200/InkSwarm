@@ -6,13 +6,14 @@ from pathlib import Path
 from typing import Any, cast
 
 import pypdfium2 as pdfium
-from PIL import Image, ImageCms, ImageFile
+from PIL import Image, ImageCms
 
 from .i18n import normalize_language, translate
 from .models import DEFAULT_RASTER_DPI
 
 Image.MAX_IMAGE_PIXELS = None
-ImageFile.LOAD_TRUNCATED_IMAGES = True
+# Do NOT enable ImageFile.LOAD_TRUNCATED_IMAGES: incomplete or corrupt bitmaps must
+# raise during decode so they are rejected, never printed as partial output.
 
 MM_PER_INCH = 25.4
 PDF_POINTS_PER_INCH = 72.0
@@ -79,6 +80,12 @@ def _inspect_image(
 ) -> TaskInspection:
     try:
         with Image.open(file_path) as image:
+            # Force a full decode up front so a truncated/incomplete bitmap raises
+            # here instead of being silently printed as a partial image later.
+            try:
+                image.load()
+            except OSError as exc:
+                raise TaskInspectionError(translate(language, "task_inspector.truncated")) from exc
             mode = image.mode
             embedded_profile = image.info.get("icc_profile")
             # CMYK can only be interpreted with an embedded profile or, failing

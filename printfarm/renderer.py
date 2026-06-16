@@ -9,7 +9,7 @@ import threading
 import time
 
 import pypdfium2 as pdfium
-from PIL import Image, ImageCms, ImageFile
+from PIL import Image, ImageCms
 
 from .i18n import normalize_language, translate
 from .models import (
@@ -30,7 +30,8 @@ from .debug_logger import debug_exception, debug_log
 from .task_inspector import MM_PER_INCH, PDF_POINTS_PER_INCH, get_image_dpi
 
 Image.MAX_IMAGE_PIXELS = None
-ImageFile.LOAD_TRUNCATED_IMAGES = True
+# Do NOT enable ImageFile.LOAD_TRUNCATED_IMAGES: incomplete or corrupt bitmaps must
+# raise during decode so they are rejected, never printed as partial output.
 
 
 IMAGE_RIP_PRESHRINK_FACTOR = 2.0
