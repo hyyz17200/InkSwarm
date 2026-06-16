@@ -188,17 +188,6 @@ class MonthlyStatisticsWriter:
             pending = len([p for p in self.pending_dir.glob("*.json") if p.stem in selected])
         return StatisticsFlushResult(flushed_runs=flushed, pending_runs=pending, errors=tuple(errors))
 
-    def append_success(self, started_at_ts: float, file_name: str, quantity: int) -> None:
-        run_id = self.new_run_id()
-        task_id = uuid.uuid4().hex
-        task = StatisticsTaskRecord(task_id=task_id, file_name=file_name, requested_copies=int(quantity))
-        self.begin_run(run_id, started_at_ts, [task])
-        self.record_success(run_id, task_id, file_name, int(quantity), int(quantity), started_at_ts)
-        result = self.finish_run(run_id, started_at_ts)
-        if not result.ok:
-            message = "; ".join(result.errors) or f"{result.pending_runs} pending runs"
-            raise PermissionError(message)
-
     def read_monthly_report(self, month: str | None = None) -> MonthlyStatisticsReport:
         selected_month = self._safe_month(month)
         target = self.statistics_dir / f"{selected_month}.csv"
