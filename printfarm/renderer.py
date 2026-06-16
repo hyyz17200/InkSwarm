@@ -33,10 +33,6 @@ Image.MAX_IMAGE_PIXELS = None
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
-PDF_RENDER_LOCKS: dict[str, threading.Lock] = {}
-PDF_RENDER_LOCKS_GUARD = threading.Lock()
-RENDER_KEY_LOCKS: dict[str, threading.Lock] = {}
-RENDER_KEY_LOCKS_GUARD = threading.Lock()
 IMAGE_RIP_PRESHRINK_FACTOR = 2.0
 
 
@@ -97,6 +93,18 @@ class Renderer:
         # which is what catches a same-size/same-mtime edit between runs.
         self._source_signature_cache: dict[tuple[str, int, int], dict[str, Any]] = {}
         self._source_signature_lock = threading.Lock()
+        # Render serialization, scoped to this Renderer instance. The controller
+        # builds a fresh Renderer per run and runs never overlap, so these lock
+        # maps coordinate only the workers of the current run and are freed with
+        # the Renderer when the run ends, instead of growing for the life of the
+        # process. _pdf_render_locks holds one lock per source PDF path (so a file
+        # is not rendered by two workers at once); _render_key_locks holds one lock
+        # per cache key (so identically configured workers that share a cache
+        # directory render/write it once while the others wait and then read it).
+        self._pdf_render_locks: dict[str, threading.Lock] = {}
+        self._pdf_render_locks_guard = threading.Lock()
+        self._render_key_locks: dict[str, threading.Lock] = {}
+        self._render_key_locks_guard = threading.Lock()
 
     def ensure_render_cache(self, task: TaskItem, worker: WorkerConfig) -> RenderArtifact:
         preset = worker.get_active_preset()
@@ -221,11 +229,11 @@ class Renderer:
         return RenderArtifact(cache_dir=cache_dir, page_paths=page_paths, metadata=metadata)
 
     def _get_render_key_lock(self, key: str) -> threading.Lock:
-        with RENDER_KEY_LOCKS_GUARD:
-            lock = RENDER_KEY_LOCKS.get(key)
+        with self._render_key_locks_guard:
+            lock = self._render_key_locks.get(key)
             if lock is None:
                 lock = threading.Lock()
-                RENDER_KEY_LOCKS[key] = lock
+                self._render_key_locks[key] = lock
             return lock
 
     @staticmethod
@@ -302,11 +310,11 @@ class Renderer:
 
     def _get_pdf_render_lock(self, pdf_path: Path) -> threading.Lock:
         key = str(pdf_path.resolve()).lower()
-        with PDF_RENDER_LOCKS_GUARD:
-            lock = PDF_RENDER_LOCKS.get(key)
+        with self._pdf_render_locks_guard:
+            lock = self._pdf_render_locks.get(key)
             if lock is None:
                 lock = threading.Lock()
-                PDF_RENDER_LOCKS[key] = lock
+                self._pdf_render_locks[key] = lock
             return lock
 
     def _load_pdf_page_with_retry(self, document: pdfium.PdfDocument, index: int, pdf_path: Path, worker: WorkerConfig):
