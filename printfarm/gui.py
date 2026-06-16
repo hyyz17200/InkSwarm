@@ -70,12 +70,15 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.3.5"
+APP_VERSION = "0.3.6"
 DEBUG_LOG_NAME = "debug.log"
 DEFAULT_WINDOW_WIDTH = 1450
 DEFAULT_WINDOW_HEIGHT = 940
 # Edit these three values to tune the vertical pane heights: task, worker, log.
 DEFAULT_VERTICAL_PANE_HEIGHTS = (320, 420, 320)
+# Max log lines kept in the on-screen view (~7.5 KB/line); ~40 MB ceiling at 5000.
+# Full history is still persisted to logs/ via LocalLogWriter, so nothing is lost.
+LOG_VIEW_MAX_BLOCKS = 5000
 STATISTICS_HIDDEN_COLUMNS = {"Run ID"}
 
 
@@ -429,6 +432,10 @@ class MainWindow(QMainWindow):
         log_page_layout.setSpacing(0)
         self.log_edit = QPlainTextEdit()
         self.log_edit.setReadOnly(True)
+        # Cap the on-screen scrollback (~7.5 KB/line in QPlainTextEdit) so a long
+        # production session can't grow unbounded; full history stays in logs/.
+        self.log_edit.setMaximumBlockCount(LOG_VIEW_MAX_BLOCKS)
+        self.log_edit.setUndoRedoEnabled(False)
         log_page_layout.addWidget(self.log_edit, 1)
         self.log_stack.addWidget(log_page)
 
