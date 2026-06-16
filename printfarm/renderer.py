@@ -497,7 +497,10 @@ class Renderer:
         if preset.black_point_compensation and bpc_flag:
             flags |= cast(Any, bpc_flag)
 
-        working_image = image.convert("CMYK" if source_mode == "CMYK" else "RGB")
+        # After the normalization above, image.mode already equals source_mode
+        # (RGBA is flattened, any non-RGB/CMYK mode is converted to RGB), so the
+        # image is already in its working color space; no extra convert needed.
+        working_image = image
         # The output is always rasterized to an RGB DIB and handed to the Windows
         # GDI printer DC, so the output (printer) ICC must describe an RGB device
         # space. A CMYK/Gray/Lab output profile would silently produce wrong color,

@@ -44,7 +44,7 @@ class ConfigStore:
             elif entry.name.startswith("Workers"):
                 names.append(entry.name)
         if not names:
-                names = [self.default_group_dir().name]
+            names = [self.default_group_dir().name]
         return names
 
     def _worker_config_exists_anywhere(self) -> bool:
