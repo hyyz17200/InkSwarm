@@ -1,4 +1,6 @@
-PySide6>=6.7
-pypdfium2>=4.30
-Pillow>=10.3
-pywin32>=306
+# Windows-only desktop app; tested on Python 3.12
+# Lower bounds = tested versions; upper bounds cap the next major to avoid surprise breakage.
+PySide6>=6.11,<6.12      # pulls the matching shiboken6 automatically
+pypdfium2>=5.8,<6
+Pillow>=12,<13
+pywin32>=311; sys_platform == "win32"
