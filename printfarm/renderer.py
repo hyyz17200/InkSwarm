@@ -42,15 +42,26 @@ def _icc_fingerprint(path: Path | None) -> str:
 
     Identity is based on ICC *content* rather than its path/filename, so workers
     with the same model/ink/paper/ICC combination share one render cache even
-    when their preset files live in different directories. A missing or unset
-    profile maps to "" to match the renderer's fallback (no input/output ICC).
+    when their preset files live in different directories. An *unset* profile
+    maps to "" to match the renderer's fallback (no input/output ICC).
+
+    A profile that is *configured* but cannot be read (file missing or
+    unreadable) must NOT collapse to "": doing so makes a broken ICC config
+    share a cache key with "no ICC at all", so a stale no-ICC cache can be
+    served and silently bypass the ICC validation that only runs on an actual
+    render (a dangerous, silent color-management failure for printing). Such a
+    path instead maps to a distinct, non-empty sentinel so its key never matches
+    the not-configured key. The render then misses the cache, reaches the open
+    path, and surfaces the real error (renderer.output_icc_missing /
+    renderer.cmyk_fallback_icc_unreadable, ...). A failed render raises before
+    writing metadata, so a sentinel key never produces a cached artifact.
     """
     if path is None:
         return ""
     try:
         return file_content_hash(path)
     except OSError:
-        return ""
+        return f"<unreadable:{os.path.normcase(os.path.normpath(str(path)))}>"
 
 
 class PageRenderInfo(TypedDict):

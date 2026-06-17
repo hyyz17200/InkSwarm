@@ -9,7 +9,7 @@ import os
 from PIL import Image
 
 from printfarm.models import PresetConfig, TaskItem, WorkerConfig
-from printfarm.renderer import Renderer
+from printfarm.renderer import Renderer, _icc_fingerprint
 
 
 class RecordingRenderer(Renderer):
@@ -171,6 +171,36 @@ class RenderCacheKeyTests(TestCase):
             second = renderer.ensure_render_cache(TaskItem(file_path=image_path), relative)
 
             self.assertNotEqual(first.cache_dir, second.cache_dir)
+
+    def test_unreadable_icc_fingerprint_differs_from_unconfigured(self) -> None:
+        # A configured-but-unreadable profile must not collapse to the "" used
+        # for an unset profile, or its cache key would collide with "no ICC".
+        with TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing.icc"
+            unconfigured = _icc_fingerprint(None)
+            broken = _icc_fingerprint(missing)
+
+            self.assertEqual(unconfigured, "")
+            self.assertNotEqual(broken, "")
+            self.assertNotEqual(broken, unconfigured)
+
+    def test_broken_output_icc_does_not_reuse_no_icc_cache(self) -> None:
+        # Render once with no output ICC so a cache exists, then point the same
+        # otherwise-identical worker at a missing output ICC. The broken config
+        # must surface as an error instead of silently serving the no-ICC cache.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "page.png"
+            self._sample_image(image_path)
+            cache = root / "cache"
+
+            no_icc_worker = self._worker(root, "Alpha")
+            Renderer(cache).ensure_render_cache(TaskItem(file_path=image_path), no_icc_worker)
+
+            broken_worker = self._worker(root, "Alpha")
+            broken_worker.get_active_preset().output_icc = str(root / "missing.icc")
+            with self.assertRaisesRegex(RuntimeError, r"output \(printer\) ICC not found"):
+                Renderer(cache).ensure_render_cache(TaskItem(file_path=image_path), broken_worker)
 
 
 class SourceSignatureTests(TestCase):
