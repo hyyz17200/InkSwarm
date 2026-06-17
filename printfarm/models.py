@@ -48,6 +48,32 @@ def cache_image_format_spec(value: object) -> tuple[str, str, dict[str, Any]]:
     return "tif", "TIFF", {"compression": "tiff_deflate"}
 
 
+# Page sizing / placement modes. This is a draw-time decision (it only changes the
+# destination rectangle on the printer DC, never the rasterized bitmap), so it is a
+# global run option rather than a render/cache parameter and does not invalidate the
+# render cache. All modes keep the image centered on the physical page.
+#   ACTUAL     : print at the file's true physical size (1:1); if it is larger than
+#                the page, shrink it to fit while keeping the aspect ratio. Default.
+#   ACTUAL_100 : always print at exact 100% physical size and never scale; if it is
+#                larger than the page only the centered part prints and the outer
+#                edge is cropped. Use when millimeter accuracy must be guaranteed.
+#   FIT        : scale up or down to fit the page, keeping the aspect ratio; the whole
+#                image stays visible, possibly with blank margins.
+#   FILL       : scale to cover the whole page, keeping the aspect ratio; overflow is
+#                cropped so no blank margin is left.
+FIT_MODE_ACTUAL = "actual"
+FIT_MODE_ACTUAL_100 = "actual_100"
+FIT_MODE_FIT = "fit"
+FIT_MODE_FILL = "fill"
+FIT_MODES = (FIT_MODE_ACTUAL, FIT_MODE_ACTUAL_100, FIT_MODE_FIT, FIT_MODE_FILL)
+DEFAULT_FIT_MODE = FIT_MODE_ACTUAL
+
+
+def normalize_fit_mode(value: object) -> str:
+    text = str(value or "").strip()
+    return text if text in FIT_MODES else DEFAULT_FIT_MODE
+
+
 @dataclass
 class TaskItem:
     file_path: Path
@@ -93,7 +119,6 @@ class TaskItem:
 class PresetConfig:
     name: str
     dpi: int = 300
-    fit_mode: str = "actual"
     rendering_intent: str = "relative_colorimetric"
     output_icc: str = ""
     printui_restore_file: str = ""
@@ -107,7 +132,6 @@ class PresetConfig:
         return cls(
             name=file_stem,
             dpi=int(data.get("dpi", 300)),
-            fit_mode=data.get("fit_mode", "actual"),
             rendering_intent=data.get("rendering_intent", "relative_colorimetric"),
             output_icc=data.get("output_icc", ""),
             printui_restore_file=data.get("printui_restore_file", ""),
@@ -120,7 +144,6 @@ class PresetConfig:
         return {
             "name": self.name,
             "dpi": self.dpi,
-            "fit_mode": self.fit_mode,
             "rendering_intent": self.rendering_intent,
             "output_icc": self.output_icc,
             "printui_restore_file": self.printui_restore_file,
@@ -213,6 +236,7 @@ class RunOptions:
     auto_orient_enabled: bool = False
     target_orientation: str = "portrait"
     ignore_margins: bool = True
+    fit_mode: str = DEFAULT_FIT_MODE
     worker_queue_limit_enabled: bool = False
     worker_queue_limit: int = 0
     queue_poll_seconds: float = 5.0

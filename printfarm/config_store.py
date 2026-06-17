@@ -4,7 +4,7 @@ from pathlib import Path
 import json
 from typing import Any, Iterable
 
-from .models import DEFAULT_CACHE_IMAGE_FORMAT, AppPaths, PresetConfig, TaskItem, WorkerConfig
+from .models import DEFAULT_CACHE_IMAGE_FORMAT, DEFAULT_FIT_MODE, AppPaths, PresetConfig, TaskItem, WorkerConfig
 
 
 class ConfigStore:
@@ -85,7 +85,6 @@ class ConfigStore:
                     {
                         "name": "default",
                         "dpi": 300,
-                        "fit_mode": "actual",
                         "rendering_intent": "relative_colorimetric",
                         "output_icc": "",
                         "printui_restore_file": "",
@@ -158,6 +157,7 @@ class ConfigStore:
             "auto_orient_enabled": False,
             "target_orientation": "portrait",
             "ignore_margins": True,
+            "fit_mode": DEFAULT_FIT_MODE,
             "worker_queue_limit_enabled": False,
             "worker_queue_limit": 3,
             "queue_poll_seconds": 5,

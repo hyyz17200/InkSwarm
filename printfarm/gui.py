@@ -53,12 +53,14 @@ from .models import (
     CACHE_FORMAT_TIFF_DEFLATE,
     CACHE_FORMAT_TIFF_NONE,
     CACHE_IMAGE_FORMATS,
+    FIT_MODES,
     SUPPORTED_INPUT_SUFFIXES,
     TaskItem,
     TaskStatusMessage,
     WorkerConfig,
     WorkerStatusMessage,
     normalize_cache_image_format,
+    normalize_fit_mode,
     resolve_icc_path,
 )
 from .run_service import RunService
@@ -70,7 +72,7 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.3.9"
+APP_VERSION = "0.3.10"
 DEBUG_LOG_NAME = "debug.log"
 DEFAULT_WINDOW_WIDTH = 1450
 DEFAULT_WINDOW_HEIGHT = 940
@@ -507,7 +509,7 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle(self.t("settings.title"))
         dialog.setModal(True)
-        dialog.resize(520, 500)
+        dialog.resize(540, 580)
 
         layout = QVBoxLayout(dialog)
         form = QFormLayout()
@@ -555,6 +557,28 @@ class MainWindow(QMainWindow):
         ignore_margins_checkbox = QCheckBox(self.t("settings.ignore_margins_text"))
         ignore_margins_checkbox.setChecked(bool(self.app_settings.get("ignore_margins", True)))
         form.addRow(self.t("settings.ignore_margins"), ignore_margins_checkbox)
+
+        # Page sizing (fit) mode. A short description of the selected mode is shown
+        # below the combo and updated live so the user understands what each option
+        # actually does before applying it.
+        fit_mode_combo = QComboBox()
+        for mode in FIT_MODES:
+            fit_mode_combo.addItem(self.t(f"settings.fit_mode.{mode}"), mode)
+        fit_mode_idx = fit_mode_combo.findData(normalize_fit_mode(self.app_settings.get("fit_mode")))
+        if fit_mode_idx >= 0:
+            fit_mode_combo.setCurrentIndex(fit_mode_idx)
+        fit_mode_desc = QLabel()
+        fit_mode_desc.setWordWrap(True)
+        fit_mode_desc.setObjectName("settingsHintLabel")
+
+        def _update_fit_mode_desc(_index: int = 0) -> None:
+            mode = normalize_fit_mode(fit_mode_combo.currentData())
+            fit_mode_desc.setText(self.t(f"settings.fit_mode.{mode}_desc"))
+
+        fit_mode_combo.currentIndexChanged.connect(_update_fit_mode_desc)
+        _update_fit_mode_desc()
+        form.addRow(self.t("settings.fit_mode"), fit_mode_combo)
+        form.addRow("", fit_mode_desc)
 
         printer_defaults_checkbox = QCheckBox(self.t("status.enabled"))
         printer_defaults_checkbox.setChecked(bool(self.app_settings.get("printer_defaults_check_enabled", True)))
@@ -693,6 +717,7 @@ class MainWindow(QMainWindow):
         self.app_settings["language"] = new_language
         self.app_settings["font_engine"] = str(font_engine_combo.currentData() or "auto")
         self.app_settings["ignore_margins"] = bool(ignore_margins_checkbox.isChecked())
+        self.app_settings["fit_mode"] = normalize_fit_mode(fit_mode_combo.currentData())
         self.app_settings["printer_defaults_check_enabled"] = bool(printer_defaults_checkbox.isChecked())
         self.app_settings["cmyk_fallback_icc"] = cmyk_fallback_edit.text().strip()
         self.app_settings["auto_orient_enabled"] = bool(orient_enabled_checkbox.isChecked())
@@ -815,6 +840,10 @@ class MainWindow(QMainWindow):
             QPushButton#dangerActionButton {{
                 font-weight: 700;
                 padding: {max(10, round(12 * scale / 100))}px;
+            }}
+            QLabel#settingsHintLabel {{
+                color: palette(mid);
+                padding: 0 0 6px 0;
             }}
         """
 

@@ -256,6 +256,7 @@ class WorkerRuntime(threading.Thread):
                 job_name=batch.task.file_name(),
                 copies=batch.copies,
                 ignore_margins=self.run_options.ignore_margins,
+                fit_mode=self.run_options.fit_mode,
                 before_each_copy=before_each_copy,
                 after_each_copy=after_each_copy,
                 before_send=lambda: self._begin_spool_send(batch.task.file_name()),

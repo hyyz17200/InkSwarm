@@ -6,7 +6,7 @@ from typing import Any, Iterable
 import copy
 
 from .i18n import normalize_language
-from .models import RunOptions, TaskItem, WorkerConfig, normalize_cache_image_format, resolve_icc_path
+from .models import RunOptions, TaskItem, WorkerConfig, normalize_cache_image_format, normalize_fit_mode, resolve_icc_path
 from .worker_service import validate_unique_worker_names
 
 
@@ -49,6 +49,7 @@ class RunService:
             auto_orient_enabled=bool(settings.get("auto_orient_enabled", False)),
             target_orientation=str(settings.get("target_orientation", "portrait") or "portrait").lower(),
             ignore_margins=bool(settings.get("ignore_margins", True)),
+            fit_mode=normalize_fit_mode(settings.get("fit_mode")),
             worker_queue_limit_enabled=bool(settings.get("worker_queue_limit_enabled", False)),
             worker_queue_limit=int(settings.get("worker_queue_limit", 3) or 3),
             queue_poll_seconds=max(1.0, float(settings.get("queue_poll_seconds", 5) or 5)),
