@@ -9,7 +9,7 @@ import threading
 
 
 from PySide6.QtCore import Qt, QUrl, QTimer, Signal
-from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QFont, QIcon, QPalette, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QFont, QFontMetrics, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -74,7 +74,7 @@ from .debug_logger import debug_exception, debug_log, initialize_debug_logging, 
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.3.12"
+APP_VERSION = "0.3.13"
 DEBUG_LOG_NAME = "debug.log"
 DEFAULT_WINDOW_WIDTH = 1450
 DEFAULT_WINDOW_HEIGHT = 940
@@ -367,6 +367,7 @@ class MainWindow(QMainWindow):
         worker_left_layout.addLayout(worker_buttons)
 
         controls_panel = QFrame()
+        self.worker_controls_panel = controls_panel
         controls_panel.setObjectName("workerControlPanel")
         controls_panel.setMinimumWidth(150)
         controls_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
@@ -911,6 +912,32 @@ class MainWindow(QMainWindow):
             self.t("worker_table.status"),
         ]
 
+    def _enabled_column_width(self, scale: int) -> int:
+        """Width for the checkbox 'Enabled' column, fitted to its header text.
+
+        The header label ('Enabled' in English, '启用' in Chinese) is wider than
+        the checkbox below it, and English is wider than Chinese, so a fixed width
+        clips the label. Derive the width from the rendered header text at the
+        current (scaled) font instead of hardcoding pixels, so it stays correct
+        across languages and UI scales.
+        """
+        app = QApplication.instance()
+        font = app.font() if isinstance(app, QApplication) else self._base_font()
+        metrics = QFontMetrics(font)
+        label = max(
+            (self.t("task_table.enabled"), self.t("worker_table.enabled")),
+            key=metrics.horizontalAdvance,
+        )
+        # QHeaderView::section adds 6px padding per side; leave headroom for the
+        # sort indicator and sub-pixel rounding so the label never clips.
+        fitted = metrics.horizontalAdvance(label) + 28
+        return max(round(56 * scale / 100), fitted)
+
+    def _apply_enabled_column_widths(self, scale: int) -> None:
+        width = self._enabled_column_width(scale)
+        self.task_table.setColumnWidth(0, width)
+        self.worker_table.setColumnWidth(0, width)
+
     def apply_language(self, refresh_statistics: bool = True) -> None:
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
         self.settings_action.setText(self.t("menu.settings"))
@@ -926,6 +953,7 @@ class MainWindow(QMainWindow):
 
         self.task_table.setHorizontalHeaderLabels(self._task_table_headers())
         self.worker_table.setHorizontalHeaderLabels(self._worker_table_headers())
+        self._apply_enabled_column_widths(int(self.app_settings.get("ui_scale", 100)))
         self.btn_add_tasks.setText(self.t("actions.add_files"))
         self.btn_remove_tasks.setText(self.t("actions.remove_selected"))
         self.btn_clear_tasks.setText(self.t("actions.clear_tasks"))
@@ -1011,14 +1039,18 @@ class MainWindow(QMainWindow):
         self.start_button.setMaximumHeight(button_height + max(9, round(15 * scale / 100)))
         self.stop_button.setMaximumHeight(button_height + max(9, round(15 * scale / 100)))
         self.spool_progress_bar.setMinimumHeight(max(24, round(28 * scale / 100)))
-        self.worker_table.setColumnWidth(0, max(54, round(56 * scale / 100)))
+        # These minimum widths used to be hardcoded, so at high scale their text
+        # grew while the box did not, causing the crowding/clipping. Scale them too.
+        self.preview_label.setMinimumWidth(max(200, round(240 * scale / 100)))
+        self.worker_group_combo.setMinimumWidth(max(130, round(150 * scale / 100)))
+        self.worker_controls_panel.setMinimumWidth(max(130, round(150 * scale / 100)))
+        self._apply_enabled_column_widths(scale)
         self.worker_table.setColumnWidth(1, max(130, round(150 * scale / 100)))
         self.worker_table.setColumnWidth(2, max(130, round(150 * scale / 100)))
         self.worker_table.setColumnWidth(3, max(180, round(225 * scale / 100)))
         self.worker_table.setColumnWidth(4, max(76, round(82 * scale / 100)))
         self.worker_table.setColumnWidth(5, max(110, round(290 * scale / 100)))
         self.task_copies_value_box.setFixedWidth(max(82, round(88 * scale / 100)))
-        self.task_table.setColumnWidth(0, max(54, round(56 * scale / 100)))
         self.task_table.setColumnWidth(2, max(82, round(88 * scale / 100)))
         size_width = max(210, round(230 * scale / 100))
         status_width = max(140, round(250 * scale / 100))
@@ -1026,7 +1058,20 @@ class MainWindow(QMainWindow):
         self.task_table.setColumnWidth(4, status_width)
         self.top_splitter.setSizes([max(860, round(1120 * scale / 100)), max(220, round(260 * scale / 100))])
         self._apply_vertical_pane_layout(scale)
+        self._grow_window_for_scale(scale)
         self.update_task_preview()
+
+    def _grow_window_for_scale(self, scale: int) -> None:
+        """Widen the window as the UI scale grows so content has room to breathe,
+        clamped to the screen's work area so it never opens off-screen. Only ever
+        grows, so it never fights a width the user picked manually."""
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry().width()
+        target = min(round(DEFAULT_WINDOW_WIDTH * scale / 100), available)
+        if self.width() < target:
+            self.resize(target, self.height())
 
     def apply_saved_startup_ui_state(self) -> None:
         if self._ui_scale_applied_once:
