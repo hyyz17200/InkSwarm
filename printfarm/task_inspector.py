@@ -48,8 +48,9 @@ def _cmyk_fallback_available(cmyk_fallback_icc: Path | None) -> bool:
 
 
 def _inspect_pdf(file_path: Path, preview_max_size: tuple[int, int], language: str) -> TaskInspection:
-    document = pdfium.PdfDocument(str(file_path))
+    document: pdfium.PdfDocument | None = None
     try:
+        document = pdfium.PdfDocument(str(file_path))
         if len(document) == 0:
             raise TaskInspectionError(translate(language, "task_inspector.empty_pdf"))
         first_page = document[0]
@@ -69,7 +70,8 @@ def _inspect_pdf(file_path: Path, preview_max_size: tuple[int, int], language: s
     except Exception as exc:
         raise TaskInspectionError(str(exc)) from exc
     finally:
-        document.close()
+        if document is not None:
+            document.close()
 
 
 def _inspect_image(

@@ -100,6 +100,29 @@ class TaskServiceAddFilesTests(TestCase):
             self.assertEqual(result.skipped[0].file_path, bad.resolve())
             self.assertEqual(result.skipped[0].reason, "broken pdf")
 
+    def test_unreadable_pdf_is_reported_as_skipped_without_aborting_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = self.make_service(root)
+            good = root / "good.png"
+            Image.new("RGB", (4, 4)).save(good)
+            bad = root / "bad.pdf"
+            bad.write_bytes(b"%PDF-broken")
+
+            # Simulate pdfium failing to open a corrupt/unreadable PDF. This used to
+            # raise out of _inspect_pdf and abort the whole import; it must now be
+            # caught and recorded as a skip while the good file is still added.
+            with patch(
+                "printfarm.task_inspector.pdfium.PdfDocument",
+                side_effect=RuntimeError("cannot open pdf"),
+            ):
+                result = service.add_files([], [good, bad])
+
+            self.assertEqual(result.added_count, 1)
+            self.assertEqual(len(result.skipped), 1)
+            self.assertEqual(result.skipped[0].file_path, bad.resolve())
+            self.assertEqual(result.skipped[0].reason, "cannot open pdf")
+
 
 class TaskServiceRestoreTests(TestCase):
     def test_restore_reports_missing_session_file_as_skipped(self) -> None:
@@ -146,6 +169,16 @@ class TaskInspectionLocalizationTests(TestCase):
         with patch("printfarm.task_inspector.pdfium.PdfDocument", return_value=EmptyDocument()):
             with self.assertRaisesRegex(TaskInspectionError, "PDF 没有页面"):
                 inspect_task_input(Path("empty.pdf"), language="zh-Hans")
+
+    def test_unreadable_pdf_open_failure_raises_inspection_error(self) -> None:
+        # A failure to even open the document must be wrapped as TaskInspectionError
+        # rather than letting pdfium's raw RuntimeError propagate.
+        with patch(
+            "printfarm.task_inspector.pdfium.PdfDocument",
+            side_effect=RuntimeError("cannot open pdf"),
+        ):
+            with self.assertRaisesRegex(TaskInspectionError, "cannot open pdf"):
+                inspect_task_input(Path("broken.pdf"))
 
     def test_cmyk_without_icc_error_localizes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
