@@ -501,7 +501,7 @@ class PrintController:
 
             if tail_coordinator is not None:
                 tail_coordinator.close_dispatch()
-                tail_coordinator.wait_until_done()
+                tail_coordinator.wait_until_done(stop_event)
             else:
                 for q in queues.values():
                     q.join()

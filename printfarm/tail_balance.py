@@ -68,9 +68,11 @@ class TailBalanceCoordinator:
             self._dispatch_closed = True
             self._condition.notify_all()
 
-    def wait_until_done(self) -> None:
+    def wait_until_done(self, stop_event: threading.Event | None = None) -> None:
         with self._condition:
             while self._outstanding_batches > 0:
+                if stop_event is not None and stop_event.is_set():
+                    return
                 self._condition.wait(0.1)
 
     def get_next(self, worker_name: str, stop_event: threading.Event) -> TailBalanceAssignment | None:
@@ -85,7 +87,10 @@ class TailBalanceCoordinator:
                 if self._dispatch_closed and self._outstanding_batches <= 0:
                     return None
 
-                if not self._dispatch_closed or stop_event.is_set():
+                if stop_event.is_set():
+                    return None
+
+                if not self._dispatch_closed:
                     self._condition.wait(0.1)
                     continue
 
