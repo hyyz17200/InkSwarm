@@ -9,7 +9,7 @@ import threading
 
 
 from PySide6.QtCore import Qt, QUrl, QTimer, Signal
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QPalette, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QFont, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -39,6 +40,7 @@ from PySide6.QtWidgets import (
     QTabBar,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -505,6 +507,48 @@ class MainWindow(QMainWindow):
         self.help_action.triggered.connect(self.open_help_dialog)
         menu.addAction(self.help_action)
 
+        self._build_language_menu(menu)
+
+    def _build_language_menu(self, menu) -> None:
+        # Language switcher pinned to the far right of the menu bar. Its label
+        # stays "Language" in every locale; the dropdown lists each language by
+        # its native name and marks the active one with a check.
+        self.language_menu = QMenu(self)
+        self.language_action_group = QActionGroup(self)
+        self.language_action_group.setExclusive(True)
+        self.language_actions: dict[str, QAction] = {}
+        for code, label in language_options():
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setData(code)
+            action.triggered.connect(lambda _checked=False, c=code: self.on_language_selected(c))
+            self.language_action_group.addAction(action)
+            self.language_menu.addAction(action)
+            self.language_actions[code] = action
+
+        self.language_button = QToolButton(self)
+        self.language_button.setObjectName("languageMenuButton")
+        self.language_button.setText("Language")
+        self.language_button.setMenu(self.language_menu)
+        self.language_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.language_button.setAutoRaise(True)
+        menu.setCornerWidget(self.language_button, Qt.Corner.TopRightCorner)
+        self._update_language_menu_checks()
+
+    def _update_language_menu_checks(self) -> None:
+        current = self.current_language()
+        for code, action in self.language_actions.items():
+            action.setChecked(code == current)
+
+    def on_language_selected(self, code: str) -> None:
+        new_language = normalize_language(code)
+        if new_language == self.current_language():
+            self._update_language_menu_checks()
+            return
+        self.app_settings["language"] = new_language
+        self.store.save_app_settings(self.app_settings)
+        self.apply_language(refresh_statistics=True)
+
     def open_settings_dialog(self) -> None:
         dialog = QDialog(self)
         dialog.setWindowTitle(self.t("settings.title"))
@@ -514,14 +558,6 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(dialog)
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
-        language_combo = QComboBox()
-        for code, label in language_options():
-            language_combo.addItem(label, code)
-        language_idx = language_combo.findData(self.current_language())
-        if language_idx >= 0:
-            language_combo.setCurrentIndex(language_idx)
-        form.addRow(self.t("settings.language"), language_combo)
 
         autoclear_checkbox = QCheckBox(self.t("settings.auto_clear_cache"))
         autoclear_checkbox.setChecked(bool(self.app_settings.get("auto_clear_cache_on_start", False)))
@@ -708,13 +744,11 @@ class MainWindow(QMainWindow):
         new_save_tasks = bool(save_tasks_checkbox.isChecked())
         new_font = font_edit.text().strip() or "Segoe UI"
         new_scale = int(scale_combo.currentData())
-        new_language = normalize_language(language_combo.currentData())
 
         self.app_settings["auto_clear_cache_on_start"] = new_autoclear
         self.app_settings["save_tasks_on_exit"] = new_save_tasks
         self.app_settings["font_family"] = new_font
         self.app_settings["ui_scale"] = new_scale
-        self.app_settings["language"] = new_language
         self.app_settings["font_engine"] = str(font_engine_combo.currentData() or "auto")
         self.app_settings["ignore_margins"] = bool(ignore_margins_checkbox.isChecked())
         self.app_settings["fit_mode"] = normalize_fit_mode(fit_mode_combo.currentData())
@@ -836,6 +870,17 @@ class MainWindow(QMainWindow):
             QMenuBar::item:selected {{
                 background: rgba(127, 127, 127, 0.14);
             }}
+            QToolButton#languageMenuButton {{
+                padding: 6px 10px;
+                margin: 0 2px;
+                background: transparent;
+                border: none;
+                border-radius: {max(4, base_radius - 1)}px;
+            }}
+            QToolButton#languageMenuButton:hover,
+            QToolButton#languageMenuButton:pressed {{
+                background: rgba(127, 127, 127, 0.14);
+            }}
             QPushButton#primaryActionButton,
             QPushButton#dangerActionButton {{
                 font-weight: 700;
@@ -873,6 +918,7 @@ class MainWindow(QMainWindow):
         self.print_mgmt_action.setText(self.t("menu.print_management"))
         self.restart_spooler_action.setText(self.t("menu.restart_queue"))
         self.help_action.setText(self.t("menu.about"))
+        self._update_language_menu_checks()
 
         self.task_section_label.setText(self.t("title.task_section"))
         self.worker_section_label.setText(self.t("title.worker_section"))
