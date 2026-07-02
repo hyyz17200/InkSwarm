@@ -58,6 +58,11 @@ class PrintHelperClient:
         self._proc: subprocess.Popen[str] | None = None
         self._lock = threading.Lock()
         self._terminated = False
+        # Transient counterpart of _terminated for kill_inflight(): makes the
+        # interrupted submit surface as "force-stopped" rather than "crashed",
+        # but does not latch the client shut. Cleared once consumed or when a
+        # fresh helper is started.
+        self._kill_pending = False
         # (printer_name, job_id) of a submit currently in flight. Cleared when
         # the helper confirms done/error; if the helper dies first, the record
         # is used to delete the half-submitted spooler job (see _exit_error).
@@ -80,6 +85,7 @@ class PrintHelperClient:
                 raise RuntimeError(self._t("print_helper.terminated"))
             if self._proc is not None and self._proc.poll() is None:
                 return
+            self._kill_pending = False
             command = _print_helper_command(self.language)
             debug_log(f"print helper starting: {command}")
             creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -175,7 +181,8 @@ class PrintHelperClient:
         self._cleanup_interrupted_job()
         exit_code = proc.poll()
         with self._lock:
-            terminated = self._terminated
+            terminated = self._terminated or self._kill_pending
+            self._kill_pending = False
         if terminated:
             return RuntimeError(self._t("print_helper.terminated"))
         return RuntimeError(self._t("print_helper.crashed", code=exit_code))
@@ -201,7 +208,11 @@ class PrintHelperClient:
         self._log(self._t("print_helper.inflight_job_deleted", printer_name=printer_name, job_id=job_id))
 
     def terminate(self) -> None:
-        """Hard-kill the helper (force stop). Safe to call from any thread."""
+        """Hard-kill the helper (force stop). Safe to call from any thread.
+
+        Latches the client shut: no further submissions are possible. For a
+        kill that must leave the run alive, use kill_inflight() instead.
+        """
         with self._lock:
             self._terminated = True
             proc = self._proc
@@ -211,6 +222,35 @@ class PrintHelperClient:
                 proc.kill()
             except Exception as exc:
                 debug_exception("PrintHelperClient.terminate", exc)
+
+    def kill_inflight(self) -> None:
+        """Hard-kill the helper to interrupt the current submission only.
+
+        Print-queue maintenance path: the interrupted copy fails through the
+        normal error path (including deletion of the half-submitted spooler
+        job), but the client stays usable — the next print_copy() starts a
+        fresh helper. Safe to call from any thread; a no-op when no helper
+        process is alive.
+        """
+        with self._lock:
+            proc = self._proc
+            if proc is None or proc.poll() is not None:
+                return
+            self._kill_pending = True
+        debug_log(f"print helper killing in-flight submission pid={proc.pid}")
+        try:
+            proc.kill()
+        except Exception as exc:
+            debug_exception("PrintHelperClient.kill_inflight", exc)
+            return
+        try:
+            # The pipe EOF unblocks the worker before the process handle is
+            # signaled (~16 ms window); wait for the real exit so a submission
+            # attempted right after this cannot reuse the dying process via
+            # ensure_started().
+            proc.wait(timeout=5)
+        except Exception as exc:
+            debug_exception("PrintHelperClient.kill_inflight", exc)
 
     def close(self) -> None:
         """Graceful shutdown at the end of a worker's run."""
