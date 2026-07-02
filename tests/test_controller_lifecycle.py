@@ -57,7 +57,7 @@ class _FakeSpooler:
 
 def _make_fake_print_client(control: _SpoolerControl, block: bool):
     class _FakePrintClient:
-        def __init__(self, language: str = "en") -> None:
+        def __init__(self, language: str = "en", log_callback=None) -> None:
             self._terminated = False
 
         def print_copy(

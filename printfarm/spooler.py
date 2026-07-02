@@ -41,6 +41,22 @@ class _PreparedPage:
     page_spec: dict
 
 
+def delete_spooler_job(printer_name: str, job_id: int) -> None:
+    """Remove one job from a printer's queue (cleanup after a killed submit).
+
+    Used when the print helper is force-killed mid-submit: the half-submitted
+    job was never reported as sent (it counts as failed), so removing it keeps
+    what actually reaches paper consistent with the statistics.
+    """
+    if win32print is None:
+        PrinterSpooler.validate_environment()
+    handle = win32print.OpenPrinter(printer_name)
+    try:
+        win32print.SetJob(handle, int(job_id), 0, None, win32print.JOB_CONTROL_DELETE)
+    finally:
+        win32print.ClosePrinter(handle)
+
+
 class PrinterSpooler:
     def __init__(self, language: str = "en") -> None:
         self.language = normalize_language(language)

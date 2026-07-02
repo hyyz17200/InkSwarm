@@ -139,7 +139,10 @@ class WorkerRuntime(threading.Thread):
         self.spooler: PrinterSpooler | None = None
         # GDI submission runs in a killable helper subprocess (see print_helper):
         # a worker thread stuck in a driver call could never be interrupted.
-        self.print_client = PrintHelperClient(language=run_options.language)
+        self.print_client = PrintHelperClient(
+            language=run_options.language,
+            log_callback=lambda message: signals.log.emit(LogMessage("info", f"{worker.name}: {message}")),
+        )
 
     def _t(self, key: str, **kwargs: object) -> str:
         return translate(self.run_options.language, key, **kwargs)

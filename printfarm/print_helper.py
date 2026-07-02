@@ -52,17 +52,27 @@ class PrintHelperClient:
     kills the process, which surfaces to the worker thread as pipe EOF.
     """
 
-    def __init__(self, language: str = "en") -> None:
+    def __init__(self, language: str = "en", log_callback: Callable[[str], None] | None = None) -> None:
         self.language = normalize_language(language)
+        self._log_callback = log_callback
         self._proc: subprocess.Popen[str] | None = None
         self._lock = threading.Lock()
         self._terminated = False
-        # (printer_name, job_id) of a submit currently in flight, kept for
-        # post-kill cleanup of the half-submitted spooler job.
+        # (printer_name, job_id) of a submit currently in flight. Cleared when
+        # the helper confirms done/error; if the helper dies first, the record
+        # is used to delete the half-submitted spooler job (see _exit_error).
         self._inflight_job: tuple[str, int] | None = None
 
     def _t(self, key: str, **kwargs: object) -> str:
         return translate(self.language, key, **kwargs)
+
+    def _log(self, message: str) -> None:
+        if self._log_callback is None:
+            return
+        try:
+            self._log_callback(message)
+        except Exception as exc:
+            debug_exception("PrintHelperClient._log", exc)
 
     def ensure_started(self) -> None:
         with self._lock:
@@ -125,22 +135,22 @@ class PrintHelperClient:
             proc.stdin.flush()
         except OSError as exc:
             raise self._exit_error(proc) from exc
-        try:
-            while True:
-                event = self._read_event(proc)
-                kind = event.get("event")
-                if kind == "job_started":
-                    with self._lock:
-                        self._inflight_job = (printer_name, int(event.get("job_id", 0)))
-                    continue
-                if kind == "done":
-                    return
-                if kind == "error":
-                    raise RuntimeError(str(event.get("message", "")))
-                raise RuntimeError(self._t("print_helper.protocol_error", line=str(event)))
-        finally:
+        while True:
+            event = self._read_event(proc)
+            kind = event.get("event")
+            if kind == "job_started":
+                with self._lock:
+                    self._inflight_job = (printer_name, int(event.get("job_id", 0)))
+                continue
+            # Any helper-confirmed outcome means the helper itself settled the
+            # job (EndDoc on done, AbortDoc on error): nothing left to clean.
             with self._lock:
                 self._inflight_job = None
+            if kind == "done":
+                return
+            if kind == "error":
+                raise RuntimeError(str(event.get("message", "")))
+            raise RuntimeError(self._t("print_helper.protocol_error", line=str(event)))
 
     def _read_event(self, proc: subprocess.Popen[str]) -> dict[str, Any]:
         assert proc.stdout is not None
@@ -156,6 +166,13 @@ class PrintHelperClient:
         return data
 
     def _exit_error(self, proc: subprocess.Popen[str]) -> RuntimeError:
+        """Build the error for a dead helper, cleaning up its interrupted job first.
+
+        Runs on the worker thread that was blocked on the pipe, right after the
+        helper died (force stop kill or crash), so the half-submitted spooler
+        job can be deleted before the batch fails through the error path.
+        """
+        self._cleanup_interrupted_job()
         exit_code = proc.poll()
         with self._lock:
             terminated = self._terminated
@@ -163,12 +180,25 @@ class PrintHelperClient:
             return RuntimeError(self._t("print_helper.terminated"))
         return RuntimeError(self._t("print_helper.crashed", code=exit_code))
 
-    def take_inflight_job(self) -> tuple[str, int] | None:
-        """Return and clear the (printer, job id) of a submit interrupted by kill."""
+    def _cleanup_interrupted_job(self) -> None:
         with self._lock:
             job = self._inflight_job
             self._inflight_job = None
-            return job
+        if job is None:
+            return
+        printer_name, job_id = job
+        if job_id <= 0:
+            return
+        try:
+            from .spooler import delete_spooler_job
+
+            delete_spooler_job(printer_name, job_id)
+        except Exception as exc:
+            debug_exception("PrintHelperClient._cleanup_interrupted_job", exc)
+            self._log(self._t("print_helper.inflight_job_delete_failed", printer_name=printer_name, job_id=job_id, error=exc))
+            return
+        debug_log(f"print helper interrupted job deleted printer={printer_name} job_id={job_id}")
+        self._log(self._t("print_helper.inflight_job_deleted", printer_name=printer_name, job_id=job_id))
 
     def terminate(self) -> None:
         """Hard-kill the helper (force stop). Safe to call from any thread."""
