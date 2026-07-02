@@ -34,11 +34,86 @@ win32ui: Any = None
 win32con: Any = None
 win32print: Any = None
 
+PRINTER_STATUS_PAUSED = 0x00000001
+PRINTER_STATUS_ERROR = 0x00000002
+PRINTER_STATUS_OFFLINE = 0x00000080
+PRINTER_ATTRIBUTE_WORK_OFFLINE = 0x00000400
+PRINTER_ENUM_LOCAL = 0x00000002
+PRINTER_ENUM_CONNECTIONS = 0x00000004
+
 
 @dataclass
 class _PreparedPage:
     dib: Any
     page_spec: dict
+
+
+@dataclass(frozen=True)
+class PrinterQueueSnapshot:
+    """Best-effort view of one printer's queue for maintenance drain waits.
+
+    When `unreachable` is set the query itself failed and the other fields
+    are meaningless; the caller decides whether to keep waiting.
+    """
+
+    printer_name: str
+    job_count: int = 0
+    offline: bool = False
+    paused: bool = False
+    error: bool = False
+    unreachable: str | None = None
+
+
+def read_printer_queue_snapshot(printer_name: str) -> PrinterQueueSnapshot:
+    if win32print is None:
+        PrinterSpooler.validate_environment()
+    try:
+        handle = win32print.OpenPrinter(printer_name)
+    except Exception as exc:
+        return PrinterQueueSnapshot(printer_name=printer_name, unreachable=str(exc))
+    try:
+        info = win32print.GetPrinter(handle, 2)
+        jobs = win32print.EnumJobs(handle, 0, 999, 1)
+    except Exception as exc:
+        return PrinterQueueSnapshot(printer_name=printer_name, unreachable=str(exc))
+    finally:
+        win32print.ClosePrinter(handle)
+    status = int(info.get("Status", 0))
+    attributes = int(info.get("Attributes", 0))
+    return PrinterQueueSnapshot(
+        printer_name=printer_name,
+        job_count=len(jobs or []),
+        offline=bool(status & PRINTER_STATUS_OFFLINE) or bool(attributes & PRINTER_ATTRIBUTE_WORK_OFFLINE),
+        paused=bool(status & PRINTER_STATUS_PAUSED),
+        error=bool(status & PRINTER_STATUS_ERROR),
+    )
+
+
+def list_printers_with_jobs(exclude: set[str] | None = None) -> list[PrinterQueueSnapshot]:
+    """Best-effort scan for queued jobs on printers outside the given set.
+
+    A Print Spooler restart is machine-wide, so queues InkSwarm does not
+    manage are affected too; the caller warns the user about these. Any
+    enumeration or per-printer failure degrades to "no warning" rather than
+    blocking the maintenance.
+    """
+    if win32print is None:
+        PrinterSpooler.validate_environment()
+    excluded = set(exclude or ())
+    try:
+        printers = win32print.EnumPrinters(PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS, None, 4)
+    except Exception as exc:
+        debug_exception("list_printers_with_jobs.enum", exc)
+        return []
+    results: list[PrinterQueueSnapshot] = []
+    for entry in printers or ():
+        name = str(entry.get("pPrinterName", "")) if isinstance(entry, dict) else ""
+        if not name or name in excluded:
+            continue
+        snapshot = read_printer_queue_snapshot(name)
+        if snapshot.job_count > 0:
+            results.append(snapshot)
+    return results
 
 
 def delete_spooler_job(printer_name: str, job_id: int) -> None:
