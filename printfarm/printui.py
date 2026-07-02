@@ -3,22 +3,66 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 import sys
+import threading
 from typing import Any
 
+from .debug_logger import debug_exception, debug_log
 from .i18n import normalize_language, translate
 
+# rundll32/printui processes launched on the print path (driver-settings restore
+# before a batch). Tracked so a force stop can kill a hung driver restore the
+# same way it kills a hung print helper. Interactive dialogs (preferences /
+# properties opened by the user) are deliberately not tracked.
+_active_processes: set[subprocess.Popen] = set()
+_active_processes_lock = threading.Lock()
 
-def _run_printui(args: list[str], check: bool = True, language: str = "en") -> subprocess.CompletedProcess[str]:
+
+def terminate_active_printui() -> int:
+    """Kill printui processes currently running on the print path (force stop)."""
+    with _active_processes_lock:
+        processes = list(_active_processes)
+    for process in processes:
+        try:
+            if process.poll() is None:
+                debug_log(f"printui terminating pid={process.pid}")
+                process.kill()
+        except Exception as exc:
+            debug_exception("terminate_active_printui", exc)
+    return len(processes)
+
+
+def _run_printui(
+    args: list[str],
+    check: bool = True,
+    language: str = "en",
+    track: bool = False,
+) -> subprocess.CompletedProcess[str]:
     language = normalize_language(language)
     command = [
         "rundll32.exe",
         "printui.dll,PrintUIEntry",
         *args,
     ]
-    result = subprocess.run(command, capture_output=True, text=True, shell=False)
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        shell=False,
+    )
+    if track:
+        with _active_processes_lock:
+            _active_processes.add(process)
+    try:
+        stdout, stderr = process.communicate()
+    finally:
+        if track:
+            with _active_processes_lock:
+                _active_processes.discard(process)
+    result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     if check and result.returncode != 0:
-        stderr = result.stderr.strip() or result.stdout.strip() or translate(language, "printui.unknown_error")
-        raise RuntimeError(stderr)
+        stderr_text = result.stderr.strip() or result.stdout.strip() or translate(language, "printui.unknown_error")
+        raise RuntimeError(stderr_text)
     return result
 
 
@@ -134,7 +178,7 @@ def restore_printer_settings(
             "r",
             "p",
             "h",
-        ], language=language)
+        ], language=language, track=True)
     except Exception as exc:
         raise RuntimeError(translate(language, "printui.restore_failed", error=exc)) from exc
 

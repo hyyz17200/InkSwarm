@@ -163,6 +163,7 @@ class ConfigStore:
             "queue_poll_seconds": 5,
             "tail_balance_enabled": False,
             "tail_balance_idle_seconds": 15,
+            "stop_force_wait_seconds": 15,
             "rip_limit_enabled": True,
             "rip_limit_ppi": 300,
             "printer_defaults_check_enabled": True,

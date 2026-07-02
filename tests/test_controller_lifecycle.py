@@ -36,7 +36,7 @@ class _FakeRenderer:
 
 
 class _SpoolerControl:
-    """Shared handle that lets a test observe and unblock the fake spooler."""
+    """Shared handle that lets a test observe and unblock the fake print client."""
 
     def __init__(self) -> None:
         self.release = threading.Event()
@@ -44,46 +44,48 @@ class _SpoolerControl:
         self.copies_sent = 0
 
 
-def _make_fake_spooler(control: _SpoolerControl, block: bool):
-    class _FakeSpooler:
+class _FakeSpooler:
+    """WorkerRuntime only uses the spooler for env checks and queue polling."""
+
+    def __init__(self, language: str = "en") -> None:
+        pass
+
+    @staticmethod
+    def validate_environment(language: str = "en") -> None:
+        return None
+
+
+def _make_fake_print_client(control: _SpoolerControl, block: bool):
+    class _FakePrintClient:
         def __init__(self, language: str = "en") -> None:
-            pass
+            self._terminated = False
 
-        @staticmethod
-        def validate_environment(language: str = "en") -> None:
-            return None
-
-        def print_cached_pages(
+        def print_copy(
             self,
             printer_name,
+            job_name,
             page_paths,
             page_specs,
-            job_name,
-            copies,
-            ignore_margins=True,
-            fit_mode="actual",
-            before_each_copy=None,
-            after_each_copy=None,
-            before_send=None,
-            after_send=None,
+            ignore_margins,
+            fit_mode,
+            reuse_pages=False,
         ) -> None:
-            for index in range(copies):
-                if before_each_copy is not None and before_each_copy(index + 1, copies) is False:
-                    break
-                if before_send is not None:
-                    before_send()
-                try:
-                    control.send_started.set()
-                    if block and not control.release.wait(timeout=30):
-                        raise RuntimeError("test spooler was never released")
-                finally:
-                    if after_send is not None:
-                        after_send()
-                control.copies_sent += 1
-                if after_each_copy is not None:
-                    after_each_copy(index + 1, copies)
+            control.send_started.set()
+            if block and not control.release.wait(timeout=30):
+                raise RuntimeError("test print client was never released")
+            if self._terminated:
+                # Mirrors the real client: a killed helper surfaces as an error.
+                raise RuntimeError("print helper terminated")
+            control.copies_sent += 1
 
-    return _FakeSpooler
+        def terminate(self) -> None:
+            self._terminated = True
+            control.release.set()
+
+        def close(self) -> None:
+            pass
+
+    return _FakePrintClient
 
 
 def _task(copies: int = 1) -> TaskItem:
@@ -112,12 +114,14 @@ class RunLifecycleTests(TestCase):
 
     def _run_with_fakes(self, control: _SpoolerControl, block: bool, run_options: RunOptions) -> None:
         self.addCleanup(control.release.set)
-        patch_renderer = mock.patch.object(controller_module, "Renderer", _FakeRenderer)
-        patch_spooler = mock.patch.object(controller_module, "PrinterSpooler", _make_fake_spooler(control, block))
-        patch_renderer.start()
-        patch_spooler.start()
-        self.addCleanup(patch_renderer.stop)
-        self.addCleanup(patch_spooler.stop)
+        for target, replacement in (
+            ("Renderer", _FakeRenderer),
+            ("PrinterSpooler", _FakeSpooler),
+            ("PrintHelperClient", _make_fake_print_client(control, block)),
+        ):
+            patcher = mock.patch.object(controller_module, target, replacement)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.controller.start([_task()], [_worker()], run_options)
 
     def _assert_truthful_stop(self, control: _SpoolerControl) -> None:
@@ -149,6 +153,20 @@ class RunLifecycleTests(TestCase):
             run_options=RunOptions(tail_balance_enabled=True, tail_balance_idle_seconds=1),
         )
         self._assert_truthful_stop(control)
+
+    def test_force_stop_kills_blocked_send_and_reaches_idle(self) -> None:
+        control = _SpoolerControl()
+        self._run_with_fakes(control, block=True, run_options=RunOptions())
+        self.assertTrue(control.send_started.wait(10), "fake print client send never started")
+        self.controller.stop()
+        self.assertIn(RUN_STATE_STOPPING, self.states)
+        self.assertTrue(self.controller.is_running())
+        self.controller.force_stop()
+        self.assertTrue(_wait_until(lambda: RUN_STATE_IDLE in self.states))
+        self.assertTrue(_wait_until(lambda: not self.controller.is_running()))
+        # The killed copy was never recorded as a success.
+        self.assertEqual(control.copies_sent, 0)
+        self.assertEqual(self.states, [RUN_STATE_RUNNING, RUN_STATE_STOPPING, RUN_STATE_IDLE])
 
     def test_normal_completion_goes_straight_to_idle(self) -> None:
         control = _SpoolerControl()

@@ -113,48 +113,7 @@ class PrinterSpooler:
             self._queue_waiting_states[printer_name] = True
             time.sleep(max(0.2, poll_seconds))
 
-    def print_cached_pages(
-        self,
-        printer_name: str,
-        page_paths: list[Path],
-        page_specs: list[dict],
-        job_name: str,
-        copies: int,
-        ignore_margins: bool = True,
-        fit_mode: str = DEFAULT_FIT_MODE,
-        before_each_copy: Callable[[int, int], bool | None] | None = None,
-        after_each_copy: Callable[[int, int], None] | None = None,
-        before_send: Callable[[], None] | None = None,
-        after_send: Callable[[], None] | None = None,
-    ) -> None:
-        # Each copy is a separate print job, so the page bitmaps would otherwise be
-        # re-decoded once per copy. For multi-copy jobs decode them once up front and
-        # reuse the DIBs across copies; single-copy jobs decode on demand.
-        prepared = self._prepare_pages(page_paths, page_specs) if copies > 1 else None
-        try:
-            for copy_index in range(copies):
-                if before_each_copy is not None:
-                    if before_each_copy(copy_index + 1, copies) is False:
-                        break
-                effective_name = f"{job_name} [copy {copy_index + 1}/{copies}]"
-                debug_log(f"spooler print start printer={printer_name} job={effective_name} pages={len(page_paths)} ignore_margins={ignore_margins} predecoded={prepared is not None}")
-                if before_send is not None:
-                    before_send()
-                try:
-                    if prepared is not None:
-                        self._print_prepared_job(printer_name, prepared, effective_name, ignore_margins=ignore_margins, fit_mode=fit_mode)
-                    else:
-                        self._print_single_job(printer_name, page_paths, page_specs, effective_name, ignore_margins=ignore_margins, fit_mode=fit_mode)
-                finally:
-                    if after_send is not None:
-                        after_send()
-                debug_log(f"spooler print end printer={printer_name} job={effective_name}")
-                if after_each_copy is not None:
-                    after_each_copy(copy_index + 1, copies)
-        finally:
-            prepared = None  # release the held DIBs promptly
-
-    def _prepare_pages(self, page_paths: list[Path], page_specs: list[dict]) -> list[_PreparedPage] | None:
+    def prepare_pages(self, page_paths: list[Path], page_specs: list[dict]) -> list[_PreparedPage] | None:
         """Decode every page once into reusable DIBs, or None if too large to hold.
 
         Returning None makes the caller fall back to per-copy streaming, keeping
@@ -174,42 +133,53 @@ class PrinterSpooler:
         debug_log(f"spooler predecode pages={len(prepared)} est_bytes={total_bytes}")
         return prepared
 
-    def _print_prepared_job(self, printer_name: str, prepared: list[_PreparedPage], job_name: str, ignore_margins: bool = True, fit_mode: str = DEFAULT_FIT_MODE) -> None:
-        dc = win32ui.CreateDC()
-        dc.CreatePrinterDC(printer_name)
-        try:
-            dc.StartDoc(job_name)
-            for page in prepared:
-                dc.StartPage()
-                rect = self._compute_draw_rect(dc, page.page_spec, ignore_margins=ignore_margins, fit_mode=fit_mode)
-                page.dib.draw(dc.GetHandleOutput(), rect)
-                dc.EndPage()
-            dc.EndDoc()
-        except Exception as exc:
-            debug_exception(f"PrinterSpooler._print_prepared_job[{printer_name}:{job_name}]", exc)
-            try:
-                dc.AbortDoc()
-            except Exception:
-                pass
-            raise
-        finally:
-            dc.DeleteDC()
+    def print_single_copy(
+        self,
+        printer_name: str,
+        page_paths: list[Path],
+        page_specs: list[dict],
+        job_name: str,
+        ignore_margins: bool = True,
+        fit_mode: str = DEFAULT_FIT_MODE,
+        prepared: list[_PreparedPage] | None = None,
+        on_job_started: Callable[[int], None] | None = None,
+    ) -> None:
+        """Submit one print job (one copy of the document) to the Windows spooler.
 
-    def _print_single_job(self, printer_name: str, page_paths: list[Path], page_specs: list[dict], job_name: str, ignore_margins: bool = True, fit_mode: str = DEFAULT_FIT_MODE) -> None:
+        ``prepared`` reuses DIBs decoded by prepare_pages(); otherwise pages are
+        decoded on demand, keeping peak memory at one page. ``on_job_started``
+        receives the spooler job id right after StartDoc, before any page is
+        drawn, so a supervisor can clean up the job if this call is killed
+        mid-submit.
+        """
+        debug_log(
+            f"spooler print start printer={printer_name} job={job_name} pages={len(page_paths)} "
+            f"ignore_margins={ignore_margins} predecoded={prepared is not None}"
+        )
         dc = win32ui.CreateDC()
         dc.CreatePrinterDC(printer_name)
         try:
-            dc.StartDoc(job_name)
-            for page_path, page_spec in zip(page_paths, page_specs):
-                with Image.open(page_path) as opened:
-                    image = opened.convert("RGB")
-                    image.load()
+            job_id = dc.StartDoc(job_name)
+            if on_job_started is not None and isinstance(job_id, int) and job_id > 0:
+                on_job_started(job_id)
+            if prepared is not None:
+                for page in prepared:
                     dc.StartPage()
-                    self._draw_image_actual_size(dc, image, page_spec, ignore_margins=ignore_margins, fit_mode=fit_mode)
+                    rect = self._compute_draw_rect(dc, page.page_spec, ignore_margins=ignore_margins, fit_mode=fit_mode)
+                    page.dib.draw(dc.GetHandleOutput(), rect)
                     dc.EndPage()
+            else:
+                for page_path, page_spec in zip(page_paths, page_specs):
+                    with Image.open(page_path) as opened:
+                        image = opened.convert("RGB")
+                        image.load()
+                        dc.StartPage()
+                        rect = self._compute_draw_rect(dc, page_spec, ignore_margins=ignore_margins, fit_mode=fit_mode)
+                        ImageWin.Dib(image).draw(dc.GetHandleOutput(), rect)
+                        dc.EndPage()
             dc.EndDoc()
         except Exception as exc:
-            debug_exception(f"PrinterSpooler._print_single_job[{printer_name}:{job_name}]", exc)
+            debug_exception(f"PrinterSpooler.print_single_copy[{printer_name}:{job_name}]", exc)
             try:
                 dc.AbortDoc()
             except Exception:
@@ -217,10 +187,7 @@ class PrinterSpooler:
             raise
         finally:
             dc.DeleteDC()
-
-    def _draw_image_actual_size(self, dc, image: Image.Image, page_spec: dict, ignore_margins: bool = True, fit_mode: str = DEFAULT_FIT_MODE) -> None:
-        rect = self._compute_draw_rect(dc, page_spec, ignore_margins=ignore_margins, fit_mode=fit_mode)
-        ImageWin.Dib(image).draw(dc.GetHandleOutput(), rect)
+        debug_log(f"spooler print end printer={printer_name} job={job_name}")
 
     def _compute_draw_rect(self, dc, page_spec: dict, ignore_margins: bool = True, fit_mode: str = DEFAULT_FIT_MODE) -> tuple[int, int, int, int]:
         fit_mode = normalize_fit_mode(fit_mode)

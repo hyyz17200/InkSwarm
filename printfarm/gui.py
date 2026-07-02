@@ -204,6 +204,13 @@ class MainWindow(QMainWindow):
         # run-dependent widget state (never mix with live is_running() checks,
         # which can disagree while a stuck worker is still draining).
         self._run_state: str = RUN_STATE_IDLE
+        # Gentle-wait countdown while STOPPING; when it reaches zero the Stop
+        # button re-arms as "Force Stop" (user-triggered, never automatic).
+        self._force_stop_armed = False
+        self._stopping_seconds_left = 0
+        self._stopping_countdown_timer = QTimer(self)
+        self._stopping_countdown_timer.setInterval(1000)
+        self._stopping_countdown_timer.timeout.connect(self._on_stopping_countdown_tick)
 
         self._saved_ui_scale = int(self.app_settings.get("ui_scale", 100))
         self._ui_scale_applied_once = False
@@ -707,6 +714,13 @@ class MainWindow(QMainWindow):
         tail_balance_enabled_checkbox.toggled.connect(tail_balance_idle_spin.setEnabled)
         form.addRow(self.t("settings.tail_idle_seconds"), tail_balance_idle_spin)
 
+        stop_force_wait_spin = QSpinBox()
+        stop_force_wait_spin.setRange(0, 600)
+        stop_force_wait_spin.setSuffix(self.t("settings.seconds_suffix"))
+        stop_force_wait_spin.setValue(max(0, int(self.app_settings.get("stop_force_wait_seconds", 15) or 0)))
+        stop_force_wait_spin.setToolTip(self.t("settings.stop_force_wait_tip"))
+        form.addRow(self.t("settings.stop_force_wait"), stop_force_wait_spin)
+
         rip_limit_enabled_checkbox = QCheckBox(self.t("status.enabled"))
         rip_limit_enabled_checkbox.setChecked(bool(self.app_settings.get("rip_limit_enabled", True)))
         form.addRow(self.t("settings.rip_limit"), rip_limit_enabled_checkbox)
@@ -771,6 +785,7 @@ class MainWindow(QMainWindow):
         self.app_settings["queue_poll_seconds"] = int(queue_poll_spin.value())
         self.app_settings["tail_balance_enabled"] = bool(tail_balance_enabled_checkbox.isChecked())
         self.app_settings["tail_balance_idle_seconds"] = int(tail_balance_idle_spin.value())
+        self.app_settings["stop_force_wait_seconds"] = int(stop_force_wait_spin.value())
         self.app_settings["rip_limit_enabled"] = bool(rip_limit_enabled_checkbox.isChecked())
         self.app_settings["rip_limit_ppi"] = int(rip_limit_spin.value())
         self.app_settings["cache_image_format"] = normalize_cache_image_format(cache_format_combo.currentData())
@@ -1005,8 +1020,49 @@ class MainWindow(QMainWindow):
         self.start_button.setText(self.t(key))
 
     def _refresh_stop_button_text(self) -> None:
-        key = "actions.stopping" if self._run_state == RUN_STATE_STOPPING else "actions.stop"
-        self.stop_button.setText(self.t(key))
+        if self._run_state == RUN_STATE_STOPPING:
+            if self._force_stop_armed:
+                self.stop_button.setText(self.t("actions.force_stop"))
+            elif self._stopping_seconds_left > 0:
+                self.stop_button.setText(self.t("actions.stopping_countdown", seconds=self._stopping_seconds_left))
+            else:
+                self.stop_button.setText(self.t("actions.stopping"))
+            return
+        self.stop_button.setText(self.t("actions.stop"))
+
+    def _begin_stopping_countdown(self) -> None:
+        if self._stopping_countdown_timer.isActive() or self._force_stop_armed:
+            return
+        wait_seconds = max(0, int(self.app_settings.get("stop_force_wait_seconds", 15) or 0))
+        self._stopping_seconds_left = wait_seconds
+        if wait_seconds <= 0:
+            self._arm_force_stop()
+            return
+        self.stop_button.setEnabled(False)
+        self._stopping_countdown_timer.start()
+        self._refresh_stop_button_text()
+
+    def _on_stopping_countdown_tick(self) -> None:
+        if self._run_state != RUN_STATE_STOPPING:
+            self._end_stopping_countdown()
+            return
+        self._stopping_seconds_left -= 1
+        if self._stopping_seconds_left <= 0:
+            self._arm_force_stop()
+        else:
+            self._refresh_stop_button_text()
+
+    def _arm_force_stop(self) -> None:
+        self._stopping_countdown_timer.stop()
+        self._stopping_seconds_left = 0
+        self._force_stop_armed = True
+        self.stop_button.setEnabled(True)
+        self._refresh_stop_button_text()
+
+    def _end_stopping_countdown(self) -> None:
+        self._stopping_countdown_timer.stop()
+        self._stopping_seconds_left = 0
+        self._force_stop_armed = False
 
     def _set_spool_progress_text(self, sent: int) -> None:
         self.spool_progress_label.setText(self.t("spool.progress", sent=int(sent), total=self._spool_total))
@@ -1589,6 +1645,18 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, self.t("dialog.start_failed"), str(exc))
 
     def stop_run(self) -> None:
+        if self._run_state == RUN_STATE_STOPPING:
+            if not self._force_stop_armed:
+                return
+            # User explicitly chose Force Stop after the gentle wait ran out.
+            self._force_stop_armed = False
+            self.stop_button.setEnabled(False)
+            self.controller.force_stop()
+            # Re-run the countdown so another force attempt stays available if
+            # something is still stuck after the kill.
+            self._begin_stopping_countdown()
+            self._refresh_stop_button_text()
+            return
         if not self.controller.is_running():
             return
         self.controller.stop()
@@ -1893,10 +1961,15 @@ class MainWindow(QMainWindow):
         running = state == RUN_STATE_RUNNING
         stopping = state == RUN_STATE_STOPPING
         idle = state == RUN_STATE_IDLE
-        # While stopping, neither starting nor another stop makes sense: the
-        # run only truly ends (IDLE) once every worker thread has exited.
+        # While stopping, starting makes no sense: the run only truly ends
+        # (IDLE) once every worker thread has exited. The stop button first
+        # waits out the gentle-wait countdown, then re-arms as "Force Stop".
         self.start_button.setEnabled(not stopping)
-        self.stop_button.setEnabled(running)
+        if stopping:
+            self._begin_stopping_countdown()
+        else:
+            self._end_stopping_countdown()
+            self.stop_button.setEnabled(running)
         self._refresh_stop_button_text()
         self._set_task_editing_enabled(idle)
         if running:

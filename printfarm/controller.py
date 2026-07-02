@@ -12,8 +12,9 @@ from .i18n import normalize_language, translate
 from .models import LogMessage, RunOptions, TaskItem, TaskStatusMessage, WorkerConfig, WorkerStatusMessage, WorkerTaskBatch
 from .debug_logger import debug_exception, debug_log
 from .local_logger import QUEUE_LIMIT_LOG_KEY
+from .print_helper import PrintHelperClient
 from .printer_access import PrinterAccessCoordinator
-from .printui import restore_printer_settings
+from .printui import restore_printer_settings, terminate_active_printui
 from .renderer import Renderer
 from .scheduler import WeightedScheduler
 from .spooler import PrinterSpooler
@@ -136,12 +137,31 @@ class WorkerRuntime(threading.Thread):
         self.run_options = run_options
         self.tail_coordinator = tail_coordinator
         self.spooler: PrinterSpooler | None = None
+        # GDI submission runs in a killable helper subprocess (see print_helper):
+        # a worker thread stuck in a driver call could never be interrupted.
+        self.print_client = PrintHelperClient(language=run_options.language)
 
     def _t(self, key: str, **kwargs: object) -> str:
         return translate(self.run_options.language, key, **kwargs)
 
+    def force_terminate(self) -> None:
+        """Hard-kill this worker's in-flight print submission (force stop).
+
+        Called from another thread. Killing the helper subprocess unblocks a
+        thread stuck on an uninterruptible GDI call via pipe EOF; the batch
+        then fails through the normal error path, releasing the printer lock
+        and tail-balance bookkeeping.
+        """
+        self.print_client.terminate()
+
     def run(self) -> None:
         self.spooler = PrinterSpooler(language=self.run_options.language)
+        try:
+            self._run_loop()
+        finally:
+            self.print_client.close()
+
+    def _run_loop(self) -> None:
         self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, "Idle"))
         while True:
             assignment = self._next_assignment()
@@ -218,41 +238,7 @@ class WorkerRuntime(threading.Thread):
         )
         self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, f"Printing {batch.task.file_name()} ×{batch.copies}"))
         debug_log(f"worker batch start worker={self.worker.name} printer={batch.printer_name} preset={preset.name} task={batch.task.file_name()} copies={batch.copies}")
-        assert self.spooler is not None
-        spooler = self.spooler
         restore_file = self.worker.resolve_path(preset.printui_restore_file) if preset.printui_restore_file else None
-
-        def before_each_copy(current_copy: int, total_copies: int) -> bool | None:
-            if self.stop_event.is_set():
-                raise RuntimeError(self._t("controller.stopped"))
-            if not self._wait_for_resume(f"Paused {batch.task.file_name()}"):
-                raise RuntimeError(self._t("controller.stopped"))
-            if self.run_options.worker_queue_limit_enabled and self.run_options.worker_queue_limit > 0:
-                spooler.wait_until_queue_available(
-                    printer_name=batch.printer_name,
-                    max_queue_jobs=self.run_options.worker_queue_limit,
-                    poll_seconds=self.run_options.queue_poll_seconds,
-                    stop_event=self.stop_event,
-                    status_callback=lambda status: self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, status)),
-                    log_callback=lambda msg: self.signals.log.emit(
-                        LogMessage("info", f"{self.worker.name}: {msg}", once_key=QUEUE_LIMIT_LOG_KEY)
-                    ),
-                    log_cooldown_seconds=60.0,
-                    pause_callback=lambda: self._wait_for_resume(f"Paused {batch.task.file_name()}"),
-                    language=self.run_options.language,
-                )
-            if not self._wait_for_resume(f"Paused {batch.task.file_name()}"):
-                raise RuntimeError(self._t("controller.stopped"))
-            if self.tail_coordinator is not None and active_id is not None:
-                if not self.tail_coordinator.claim_active_copy(self.worker.name, active_id):
-                    return False
-            self.signals.worker_status.emit(
-                WorkerStatusMessage(self.worker.name, f"Printing {batch.task.file_name()} {current_copy}/{total_copies}")
-            )
-            return None
-
-        def after_each_copy(current_copy: int, total_copies: int) -> None:
-            self.progress_callback(batch.task.task_id, 1)
 
         def on_printer_wait() -> None:
             self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, f"Waiting printer {batch.printer_name}"))
@@ -294,21 +280,63 @@ class WorkerRuntime(threading.Thread):
                         language=self.run_options.language,
                     )
                 )
-            spooler.print_cached_pages(
-                printer_name=batch.printer_name,
-                page_paths=artifact.page_paths,
-                page_specs=artifact.metadata.get("pages", []),
-                job_name=batch.task.file_name(),
-                copies=batch.copies,
-                ignore_margins=self.run_options.ignore_margins,
-                fit_mode=self.run_options.fit_mode,
-                before_each_copy=before_each_copy,
-                after_each_copy=after_each_copy,
-                before_send=lambda: self._begin_spool_send(batch.task.file_name()),
-                after_send=self.spool_send_end_callback,
-            )
+            total_copies = batch.copies
+            page_specs = artifact.metadata.get("pages", [])
+            # Each copy is a separate print job submitted through the helper
+            # subprocess; for multi-copy jobs the helper keeps the decoded page
+            # DIBs across copies instead of re-decoding the cache every time.
+            reuse_pages = total_copies > 1
+            for copy_index in range(total_copies):
+                current_copy = copy_index + 1
+                if not self._before_copy(batch, current_copy, total_copies, active_id):
+                    break
+                self._begin_spool_send(batch.task.file_name())
+                try:
+                    self.print_client.print_copy(
+                        printer_name=batch.printer_name,
+                        job_name=f"{batch.task.file_name()} [copy {current_copy}/{total_copies}]",
+                        page_paths=artifact.page_paths,
+                        page_specs=page_specs,
+                        ignore_margins=self.run_options.ignore_margins,
+                        fit_mode=self.run_options.fit_mode,
+                        reuse_pages=reuse_pages,
+                    )
+                finally:
+                    self.spool_send_end_callback()
+                self.progress_callback(batch.task.task_id, 1)
         debug_log(f"worker batch end worker={self.worker.name} task={batch.task.file_name()} copies={batch.copies}")
         self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, "Idle"))
+
+    def _before_copy(self, batch: WorkerTaskBatch, current_copy: int, total_copies: int, active_id: int | None) -> bool:
+        """Checks before each copy; False means the copy was stolen and the batch ends."""
+        if self.stop_event.is_set():
+            raise RuntimeError(self._t("controller.stopped"))
+        if not self._wait_for_resume(f"Paused {batch.task.file_name()}"):
+            raise RuntimeError(self._t("controller.stopped"))
+        if self.run_options.worker_queue_limit_enabled and self.run_options.worker_queue_limit > 0:
+            assert self.spooler is not None
+            self.spooler.wait_until_queue_available(
+                printer_name=batch.printer_name,
+                max_queue_jobs=self.run_options.worker_queue_limit,
+                poll_seconds=self.run_options.queue_poll_seconds,
+                stop_event=self.stop_event,
+                status_callback=lambda status: self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, status)),
+                log_callback=lambda msg: self.signals.log.emit(
+                    LogMessage("info", f"{self.worker.name}: {msg}", once_key=QUEUE_LIMIT_LOG_KEY)
+                ),
+                log_cooldown_seconds=60.0,
+                pause_callback=lambda: self._wait_for_resume(f"Paused {batch.task.file_name()}"),
+                language=self.run_options.language,
+            )
+        if not self._wait_for_resume(f"Paused {batch.task.file_name()}"):
+            raise RuntimeError(self._t("controller.stopped"))
+        if self.tail_coordinator is not None and active_id is not None:
+            if not self.tail_coordinator.claim_active_copy(self.worker.name, active_id):
+                return False
+        self.signals.worker_status.emit(
+            WorkerStatusMessage(self.worker.name, f"Printing {batch.task.file_name()} {current_copy}/{total_copies}")
+        )
+        return True
 
     def _wait_for_resume(self, paused_status: str) -> bool:
         return self.pause_gate.wait_if_paused(
@@ -444,6 +472,30 @@ class PrintController:
         # is only reported by _run() once every worker thread has exited.
         self._emit_run_state(RUN_STATE_STOPPING)
         self.signals.log.emit(LogMessage("warning", self._t("controller.stop_requested")))
+
+    def force_stop(self) -> None:
+        """Forcibly terminate in-flight print submissions after stop() proved insufficient.
+
+        stop() is cooperative and cannot interrupt a send stuck inside a GDI
+        call. This kills each worker's print-helper subprocess (unblocking the
+        worker thread via pipe EOF) and any driver-settings restore process on
+        the print path. Copies whose submit was killed were never recorded as
+        successes, so they count as failed in the summary and statistics.
+        """
+        if not self.is_running():
+            return
+        debug_log("controller force stop requested")
+        self._stop_event.set()
+        self._set_paused(False)
+        self._emit_run_state(RUN_STATE_STOPPING)
+        self.signals.log.emit(LogMessage("warning", self._t("controller.force_stop_requested")))
+        terminated = 0
+        for runtime in list(self._runtimes):
+            if runtime.is_alive():
+                runtime.force_terminate()
+                terminated += 1
+        printui_killed = terminate_active_printui()
+        debug_log(f"controller force stop terminated helpers={terminated} printui={printui_killed}")
 
     def pause(self) -> None:
         if not self.is_running() or self.is_paused():
