@@ -70,8 +70,18 @@ from .models import (
     normalize_fit_mode,
     resolve_icc_path,
 )
+from .maintenance_flow import (
+    STAGE_DRAINING,
+    STAGE_RESTARTING,
+    STAGE_WAITING_SENDS,
+    MaintenanceControl,
+    MaintenanceOutcome,
+    MaintenanceStatus,
+    SpoolerMaintenanceFlow,
+)
 from .run_service import RunService
-from .spooler_service import SpoolerMaintenance, SpoolerMaintenanceCancelled, run_elevated_spooler_maintenance
+from .spooler import PrinterQueueSnapshot, list_printers_with_jobs
+from .spooler_service import SpoolerMaintenance, run_elevated_spooler_maintenance
 from .statistics_writer import CSV_HEADER, MonthlyStatisticsWriter
 from .task_service import SkippedTaskInput, TaskService
 from .worker_service import WorkerService, WorkerValidationError
@@ -154,8 +164,170 @@ class CenteredComboBox(QComboBox):
         )
 
 
+class SpoolerMaintenanceDialog(QDialog):
+    """Progress view for the staged print-queue restart.
+
+    Pure view: it renders MaintenanceStatus ticks coming from the flow thread
+    (forwarded by MainWindow on the GUI thread) and its buttons only set
+    MaintenanceControl events for the flow to consume. All waits are decided
+    by the user here; only the service-restart stage cannot be cancelled.
+    """
+
+    def __init__(self, parent, translator, control: MaintenanceControl) -> None:
+        super().__init__(parent)
+        self._t = translator
+        self._control = control
+        self._finished = False
+        self.setWindowTitle(self._t("spool.maintenance_dialog_title"))
+        self.setModal(True)
+        self.resize(560, 420)
+
+        layout = QVBoxLayout(self)
+        self.stage_label = QLabel(self._t("spool.maintenance_dialog_title"))
+        stage_font = self.stage_label.font()
+        stage_font.setBold(True)
+        self.stage_label.setFont(stage_font)
+        self.stage_label.setWordWrap(True)
+        layout.addWidget(self.stage_label)
+
+        self.elapsed_label = QLabel("")
+        layout.addWidget(self.elapsed_label)
+
+        self.detail_label = QLabel("")
+        self.detail_label.setWordWrap(True)
+        layout.addWidget(self.detail_label)
+
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(500)
+        layout.addWidget(self.log_view, 1)
+
+        buttons = QHBoxLayout()
+        self.force_kill_button = QPushButton(self._t("spool.force_kill_button"))
+        self.force_kill_button.clicked.connect(self._on_force_kill_clicked)
+        self.force_kill_button.setVisible(False)
+        buttons.addWidget(self.force_kill_button)
+
+        self.skip_drain_button = QPushButton(self._t("spool.skip_drain_button"))
+        self.skip_drain_button.clicked.connect(self._on_skip_drain_clicked)
+        self.skip_drain_button.setVisible(False)
+        buttons.addWidget(self.skip_drain_button)
+
+        buttons.addStretch(1)
+
+        self.cancel_button = QPushButton(self._t("actions.cancel"))
+        self.cancel_button.clicked.connect(self._on_cancel_clicked)
+        buttons.addWidget(self.cancel_button)
+
+        self.close_button = QPushButton(self._t("actions.close"))
+        self.close_button.clicked.connect(self.close)
+        self.close_button.setVisible(False)
+        buttons.addWidget(self.close_button)
+        layout.addLayout(buttons)
+
+    def update_status(self, status: MaintenanceStatus) -> None:
+        if self._finished:
+            return
+        self.stage_label.setText(self._t(f"spool.stage.{status.stage}"))
+        waiting = status.stage == STAGE_WAITING_SENDS
+        draining = status.stage == STAGE_DRAINING
+        restarting = status.stage == STAGE_RESTARTING
+        self.force_kill_button.setVisible(waiting)
+        self.skip_drain_button.setVisible(draining)
+        self.cancel_button.setEnabled(not restarting and not self._control.cancel.is_set())
+        if restarting:
+            # The service restart is not a user decision point: no wait timer.
+            self.elapsed_label.setText("")
+            self.detail_label.setText("")
+            return
+        self.elapsed_label.setText(self._t("spool.stage_elapsed", seconds=int(status.elapsed_seconds)))
+        if waiting:
+            self.detail_label.setText(self._t("spool.pending_sends", count=status.pending_sends))
+        else:
+            self.detail_label.setText("\n".join(self._printer_line(snapshot) for snapshot in status.printers))
+
+    def _printer_line(self, snapshot: PrinterQueueSnapshot) -> str:
+        flags: list[str] = []
+        if snapshot.unreachable:
+            flags.append(self._t("spool.printer_flag.unreachable", error=snapshot.unreachable))
+        else:
+            if snapshot.offline:
+                flags.append(self._t("spool.printer_flag.offline"))
+            if snapshot.paused:
+                flags.append(self._t("spool.printer_flag.paused"))
+            if snapshot.error:
+                flags.append(self._t("spool.printer_flag.error"))
+        flag_text = f" — {', '.join(flags)}" if flags else ""
+        return self._t(
+            "spool.drain_queue_line",
+            printer=snapshot.printer_name,
+            count=snapshot.job_count,
+            flags=flag_text,
+        )
+
+    def append_log(self, message: str) -> None:
+        self.log_view.appendPlainText(message)
+
+    def mark_finished(self, ok: bool, message: str) -> None:
+        self._finished = True
+        self.stage_label.setText(
+            self._t("spool.restart_complete_title") if ok else self._t("spool.maintenance_failed")
+        )
+        self.elapsed_label.setText("")
+        self.detail_label.setText(message)
+        self.force_kill_button.setVisible(False)
+        self.skip_drain_button.setVisible(False)
+        self.cancel_button.setVisible(False)
+        self.close_button.setVisible(True)
+        self.close_button.setDefault(True)
+
+    def close_silently(self) -> None:
+        self._finished = True
+        self.close()
+
+    def _on_force_kill_clicked(self) -> None:
+        confirm = QMessageBox.question(
+            self,
+            self._t("spool.force_kill_confirm_title"),
+            self._t("spool.force_kill_confirm_text"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            self._control.force_kill.set()
+
+    def _on_skip_drain_clicked(self) -> None:
+        self.skip_drain_button.setEnabled(False)
+        self._control.skip_drain.set()
+
+    def _on_cancel_clicked(self) -> None:
+        self._control.cancel.set()
+        self.cancel_button.setEnabled(False)
+        self.force_kill_button.setEnabled(False)
+        self.skip_drain_button.setEnabled(False)
+
+    def closeEvent(self, event) -> None:
+        if self._finished:
+            super().closeEvent(event)
+            return
+        # Closing the window acts like Cancel while cancelling is still
+        # possible; the dialog stays up until the flow thread acknowledges.
+        if self.cancel_button.isEnabled():
+            self._on_cancel_clicked()
+        event.ignore()
+
+    def reject(self) -> None:
+        # Esc follows the same rules as the window close button.
+        if self._finished:
+            super().reject()
+            return
+        if self.cancel_button.isEnabled():
+            self._on_cancel_clicked()
+
+
 class MainWindow(QMainWindow):
     spooler_maintenance_log = Signal(str)
+    spooler_maintenance_status = Signal(object)
     spooler_maintenance_finished = Signal(object)
 
     def __init__(self) -> None:
@@ -177,7 +349,8 @@ class MainWindow(QMainWindow):
         self.controller.signals.run_state.connect(self.on_run_state_changed)
         self.controller.signals.pause_state.connect(self.on_pause_state_changed)
         self.controller.signals.spool_progress.connect(self.on_spool_progress)
-        self.spooler_maintenance_log.connect(self.on_log_text)
+        self.spooler_maintenance_log.connect(self.on_spooler_maintenance_log)
+        self.spooler_maintenance_status.connect(self.on_spooler_maintenance_status)
         self.spooler_maintenance_finished.connect(self.on_spooler_maintenance_finished)
         self.log_writer = LocalLogWriter(self.store.paths.logs_dir)
         self.regular_log_filter = RegularLogFilter()
@@ -199,6 +372,7 @@ class MainWindow(QMainWindow):
         self.current_preview_pixmap: QPixmap | None = None
         self._spool_total = 0
         self._spooler_maintenance_active = False
+        self._spooler_maintenance_dialog: SpoolerMaintenanceDialog | None = None
         self.worker_config_error: str | None = None
         # Mirror of the last run_state signal; the single source of truth for
         # run-dependent widget state (never mix with live is_running() checks,
@@ -1666,11 +1840,20 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, self.t("dialog.processing"), self.t("spool.maintenance_active"))
             return
 
+        # A spooler restart is machine-wide: warn up front (dialog + log) when
+        # queues outside the observed worker printers hold jobs too.
+        other_jobs_warning = self._other_printer_jobs_warning()
+        if other_jobs_warning:
+            self.on_log_text(other_jobs_warning)
+        informative = self.t("spool.dialog_warning")
+        if other_jobs_warning:
+            informative = f"{other_jobs_warning}\n\n{informative}"
+
         dialog = QMessageBox(self)
         dialog.setIcon(QMessageBox.Icon.Warning)
         dialog.setWindowTitle(self.t("spool.dialog_title"))
         dialog.setText(self.t("spool.dialog_text"))
-        dialog.setInformativeText(self.t("spool.dialog_warning"))
+        dialog.setInformativeText(informative)
         restart_button = dialog.addButton(self.t("spool.confirm_restart"), QMessageBox.ButtonRole.AcceptRole)
         cancel_button = dialog.addButton(self.t("actions.cancel"), QMessageBox.ButtonRole.RejectRole)
         dialog.setDefaultButton(cancel_button)
@@ -1680,6 +1863,25 @@ class MainWindow(QMainWindow):
         clicked = dialog.clickedButton()
         if clicked == restart_button:
             self.start_spooler_maintenance()
+
+    def _enabled_worker_printer_names(self) -> list[str]:
+        names: list[str] = []
+        for worker in self.workers:
+            name = worker.printer_name.strip()
+            if worker.enabled and name and name not in names:
+                names.append(name)
+        return names
+
+    def _other_printer_jobs_warning(self) -> str | None:
+        try:
+            others = list_printers_with_jobs(exclude=set(self._enabled_worker_printer_names()))
+        except Exception as exc:
+            debug_exception("MainWindow._other_printer_jobs_warning", exc)
+            return None
+        if not others:
+            return None
+        printers = ", ".join(f"{snapshot.printer_name} ×{snapshot.job_count}" for snapshot in others)
+        return self.t("spool.other_printers_warning", printers=printers)
 
     def start_spooler_maintenance(self) -> None:
         self._spooler_maintenance_active = True
@@ -1691,89 +1893,80 @@ class MainWindow(QMainWindow):
         else:
             self.on_log_text(self.t("spool.maintenance_start_log"))
 
+        language = self.current_language()
+        control = MaintenanceControl()
+        maintenance_dialog = SpoolerMaintenanceDialog(self, translator=self.t, control=control)
+        self._spooler_maintenance_dialog = maintenance_dialog
+        maintenance_dialog.show()
+
+        def restart_service(log) -> None:
+            if SpoolerMaintenance.is_process_elevated():
+                SpoolerMaintenance(timeout_seconds=120.0, language=language).restart(log=log)
+            else:
+                log(translate(language, "spool.request_admin_log"))
+                run_elevated_spooler_maintenance(timeout_seconds=120.0, log=log, language=language)
+
+        flow = SpoolerMaintenanceFlow(
+            controller=self.controller,
+            printer_names=self._enabled_worker_printer_names(),
+            control=control,
+            restart=restart_service,
+            on_status=self.spooler_maintenance_status.emit,
+            on_log=self.spooler_maintenance_log.emit,
+            was_running=was_running,
+            language=language,
+        )
         thread = threading.Thread(
-            target=self._run_spooler_maintenance,
-            args=(was_running, self.current_language()),
+            target=lambda: self.spooler_maintenance_finished.emit(flow.run()),
             daemon=True,
             name="SpoolerMaintenance",
         )
         thread.start()
 
-    def _run_spooler_maintenance(self, resume_after_success: bool, language: str) -> None:
-        language = normalize_language(language)
+    def on_spooler_maintenance_log(self, message: str) -> None:
+        self.on_log_text(message)
+        if self._spooler_maintenance_dialog is not None:
+            self._spooler_maintenance_dialog.append_log(message)
 
-        def t(key: str, **kwargs: object) -> str:
-            return translate(language, key, **kwargs)
-
-        try:
-            if resume_after_success:
-                self.spooler_maintenance_log.emit(t("spool.pause_wait_log"))
-                if not self.controller.wait_until_paused_idle(timeout_seconds=15.0):
-                    raise RuntimeError(t("spool.pause_wait_failed"))
-                self.spooler_maintenance_log.emit(t("spool.paused_log"))
-
-            if SpoolerMaintenance.is_process_elevated():
-                maintenance = SpoolerMaintenance(timeout_seconds=120.0, language=language)
-                result = maintenance.restart(
-                    log=lambda message: self.spooler_maintenance_log.emit(message),
-                )
-            else:
-                self.spooler_maintenance_log.emit(t("spool.request_admin_log"))
-                result = run_elevated_spooler_maintenance(
-                    timeout_seconds=120.0,
-                    log=lambda message: self.spooler_maintenance_log.emit(message),
-                    language=language,
-                )
-            self.spooler_maintenance_finished.emit(
-                {
-                    "ok": True,
-                    "resume_after_success": resume_after_success,
-                }
-            )
-        except SpoolerMaintenanceCancelled as exc:
-            self.spooler_maintenance_finished.emit(
-                {
-                    "ok": False,
-                    "cancelled": True,
-                    "was_running": resume_after_success,
-                    "error": str(exc),
-                }
-            )
-        except Exception as exc:
-            debug_exception("MainWindow._run_spooler_maintenance", exc)
-            self.spooler_maintenance_finished.emit(
-                {
-                    "ok": False,
-                    "was_running": resume_after_success,
-                    "error": str(exc),
-                }
-            )
+    def on_spooler_maintenance_status(self, status: object) -> None:
+        if isinstance(status, MaintenanceStatus) and self._spooler_maintenance_dialog is not None:
+            self._spooler_maintenance_dialog.update_status(status)
 
     def on_spooler_maintenance_finished(self, result: object) -> None:
         self._spooler_maintenance_active = False
         self.restart_spooler_action.setEnabled(True)
+        maintenance_dialog = self._spooler_maintenance_dialog
+        self._spooler_maintenance_dialog = None
 
-        data = result if isinstance(result, dict) else {}
-        if data.get("ok"):
-            if data.get("resume_after_success") and self.controller.is_running():
-                self.controller.resume()
-            QMessageBox.information(self, self.t("spool.restart_complete_title"), self.t("spool.restart_complete"))
+        outcome = result if isinstance(result, MaintenanceOutcome) else MaintenanceOutcome()
+        stays_paused = outcome.was_running and self.controller.is_running()
+        if outcome.ok:
+            # Deliberately no auto-resume: after a spooler restart the user
+            # should confirm printer state before printing continues.
+            message = self.t("spool.restart_complete")
+            if stays_paused:
+                message += self.t("spool.stays_paused")
+            self.on_log_text(self.t("spool.restart_complete"))
+            if maintenance_dialog is not None:
+                maintenance_dialog.mark_finished(True, message)
             return
 
-        error = str(data.get("error") or self.t("spool.unknown_error"))
-        if data.get("cancelled"):
-            if data.get("was_running") and self.controller.is_running():
+        error = outcome.error or self.t("spool.unknown_error")
+        if outcome.cancelled:
+            # Nothing irreversible happened before the restart stage, so
+            # cancelling returns to the pre-maintenance state, including
+            # resuming a paused run.
+            if stays_paused:
                 self.controller.resume()
-            QMessageBox.information(self, self.t("actions.cancel"), error)
+            self.on_log_text(self.t("spool.maintenance_cancelled_log"))
+            if maintenance_dialog is not None:
+                maintenance_dialog.close_silently()
             return
-        pause_text = ""
-        if data.get("was_running") and self.controller.is_running():
-            pause_text = self.t("spool.stays_paused")
-        QMessageBox.warning(
-            self,
-            self.t("spool.maintenance_failed"),
-            f"{error}{pause_text}",
-        )
+
+        message = f"{error}{self.t('spool.stays_paused') if stays_paused else ''}"
+        self.on_log_text(f"{self.t('spool.maintenance_failed')}: {error}")
+        if maintenance_dialog is not None:
+            maintenance_dialog.mark_finished(False, message)
 
     def on_log(self, message) -> None:
         self.on_log_text(message.format(), once_key=getattr(message, "once_key", None))

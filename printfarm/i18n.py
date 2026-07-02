@@ -24,6 +24,7 @@ _TRANSLATIONS: Mapping[str, Mapping[str, str]] = {
         "actions.browse": "Browse…",
         "actions.cancel": "Cancel",
         "actions.clear_tasks": "Clear Tasks",
+        "actions.close": "Close",
         "actions.open_driver_preferences": "Driver Preferences",
         "actions.open_printer_properties": "Printer Properties",
         "actions.ok": "OK",
@@ -181,27 +182,46 @@ _TRANSLATIONS: Mapping[str, Mapping[str, str]] = {
         "spool.dialog_text": "This will pause InkSwarm and restart Windows Print Spooler.",
         "spool.dialog_title": "Restart Print Queue",
         "spool.dialog_warning": (
-            "Jobs already sent to the Windows print queue are not managed by InkSwarm."
-            " All printers may be briefly unavailable during the restart.\n\n"
+            "The restart runs in stages shown in a progress dialog: InkSwarm pauses sending, waits for its own "
+            "in-flight submissions, then waits for the observed printers to finish jobs already in the Windows "
+            "queue before restarting the service. Every wait is under your control — force-terminate a stuck "
+            "submission, skip a wait, or cancel.\n\n"
+            "After the restart InkSwarm stays paused until you resume manually.\n\n"
             "This operation requires administrator permission. The main window can stay non-elevated; "
             "InkSwarm will request temporary administrator permission when needed."
         ),
         "spool.drain_all_clear": "All observed printer queues are empty.",
+        "spool.drain_queue_line": "{printer}: {count} job(s) queued{flags}",
         "spool.drain_wait_log": "Waiting for the Windows print queue to drain on: {printers}",
+        "spool.force_kill_button": "Force-Terminate Stuck Submission",
+        "spool.force_kill_confirm_text": "This interrupts the in-flight print submission; interrupted copies count as failed. Continue?",
+        "spool.force_kill_confirm_title": "Force-Terminate Submission",
         "spool.force_kill_log": "Force-terminated {count} in-flight submission(s); interrupted copies count as failed.",
         "spool.maintenance_active": "Print queue maintenance is running. Please wait until it finishes.",
+        "spool.maintenance_cancelled_log": "Print queue maintenance was cancelled; the Print Spooler was not restarted.",
+        "spool.maintenance_dialog_title": "Print Queue Maintenance",
         "spool.maintenance_failed": "Print Queue Maintenance Failed",
         "spool.maintenance_pause_log": "Preparing print queue maintenance. InkSwarm is pausing sending.",
         "spool.maintenance_start_log": "Preparing print queue maintenance.",
-        "spool.pause_wait_failed": "InkSwarm did not reach a stable paused state within 15 seconds. Print Spooler restart was not continued.",
+        "spool.other_printers_warning": "Printers outside InkSwarm's workers also hold queued jobs; the restart affects them too: {printers}",
         "spool.pause_wait_log": "Waiting for InkSwarm to stabilize in pause.",
         "spool.paused_log": "InkSwarm is stably paused.",
+        "spool.pending_sends": "{count} submission(s) still in flight.",
+        "spool.printer_flag.error": "error",
+        "spool.printer_flag.offline": "offline",
+        "spool.printer_flag.paused": "paused",
+        "spool.printer_flag.unreachable": "query failed: {error}",
         "spool.progress": "Sent: {sent} / {total}",
         "spool.request_admin_log": "The main window is not elevated. Requesting temporary administrator permission for Print Spooler maintenance.",
         "spool.restart_complete": "Windows Print Spooler has restarted.",
         "spool.restart_complete_title": "Print Queue Restored",
         "spool.restart_running": "Print queue maintenance is running. Sending will not resume until it finishes.",
+        "spool.skip_drain_button": "Skip Waiting, Restart Now",
         "spool.skip_drain_log": "Queue drain skipped with {count} job(s) remaining ({printers}). The spooler will resume them after the restart.",
+        "spool.stage.draining": "Stage 2/3: waiting for printers to finish jobs already in the Windows queue",
+        "spool.stage.restarting": "Stage 3/3: restarting the Print Spooler service",
+        "spool.stage.waiting_sends": "Stage 1/3: waiting for InkSwarm's in-flight submissions to finish",
+        "spool.stage_elapsed": "Waiting in this stage for {seconds} s.",
         "spool.stays_paused": "\n\nInkSwarm remains paused. Confirm the state, then choose resume, stop, or retry.",
         "spool.unknown_error": "Unknown error",
         "spooler.dependency_import_failed": "Windows printing dependencies failed to import: {error}",
@@ -321,6 +341,7 @@ _TRANSLATIONS: Mapping[str, Mapping[str, str]] = {
         "actions.browse": "浏览…",
         "actions.cancel": "取消",
         "actions.clear_tasks": "清空任务",
+        "actions.close": "关闭",
         "actions.open_driver_preferences": "打开驱动首选项",
         "actions.open_printer_properties": "打开打印机属性",
         "actions.ok": "确定",
@@ -478,26 +499,44 @@ _TRANSLATIONS: Mapping[str, Mapping[str, str]] = {
         "spool.dialog_text": "此操作会暂停 InkSwarm，并重启 Windows Print Spooler。",
         "spool.dialog_title": "重启打印队列",
         "spool.dialog_warning": (
-            "已发送到 Windows 打印队列的任务不会由 InkSwarm 管理。"
-            "重启过程中所有打印机都可能短暂不可用。\n\n"
+            "重启将按阶段进行并在进度窗口中展示：InkSwarm 先暂停发送，等待自身正在进行的提交完成，"
+            "再等待所观测的打印机消化 Windows 队列中已有的任务，之后才重启服务。"
+            "所有等待均由你决定——可强制终止卡住的提交、跳过等待或取消。\n\n"
+            "重启完成后 InkSwarm 保持暂停，需手动恢复发送。\n\n"
             "此操作需要管理员权限。主窗口可以保持普通权限运行，InkSwarm 会在需要时临时请求管理员权限。"
         ),
         "spool.drain_all_clear": "观测的打印机队列已全部排空。",
+        "spool.drain_queue_line": "{printer}：队列中 {count} 个任务{flags}",
         "spool.drain_wait_log": "等待以下打印机的 Windows 队列排空：{printers}",
+        "spool.force_kill_button": "强制终止卡住的提交",
+        "spool.force_kill_confirm_text": "将中断正在进行的打印提交，被中断的拷贝按失败计。是否继续？",
+        "spool.force_kill_confirm_title": "强制终止提交",
         "spool.force_kill_log": "已强制终止 {count} 个进行中的提交，被中断的拷贝按失败计。",
         "spool.maintenance_active": "打印队列维护正在执行，请等待完成。",
+        "spool.maintenance_cancelled_log": "打印队列维护已取消，未重启 Print Spooler。",
+        "spool.maintenance_dialog_title": "打印队列维护",
         "spool.maintenance_failed": "打印队列维护失败",
         "spool.maintenance_pause_log": "准备维护打印队列，InkSwarm 正在暂停发送。",
         "spool.maintenance_start_log": "准备维护打印队列。",
-        "spool.pause_wait_failed": "InkSwarm 在 15 秒内未进入稳定暂停状态，未继续重启 Print Spooler。",
+        "spool.other_printers_warning": "以下不属于 InkSwarm Worker 的打印机也有排队任务，重启同样会影响它们：{printers}",
         "spool.pause_wait_log": "等待 InkSwarm 暂停稳定。",
         "spool.paused_log": "InkSwarm 已稳定暂停。",
+        "spool.pending_sends": "仍有 {count} 个提交进行中。",
+        "spool.printer_flag.error": "错误",
+        "spool.printer_flag.offline": "离线",
+        "spool.printer_flag.paused": "已暂停",
+        "spool.printer_flag.unreachable": "查询失败：{error}",
         "spool.progress": "已发送: {sent} / {total}",
         "spool.request_admin_log": "主窗口不是管理员权限，正在请求临时管理员权限执行 Print Spooler 维护。",
         "spool.restart_complete": "Windows Print Spooler 已重启完成。",
         "spool.restart_complete_title": "打印队列已恢复",
         "spool.restart_running": "正在维护打印队列，完成前不会恢复发送。",
+        "spool.skip_drain_button": "跳过等待，直接重启",
         "spool.skip_drain_log": "已跳过队列排空，剩余 {count} 个任务（{printers}），重启后将由系统继续处理。",
+        "spool.stage.draining": "阶段 2/3：等待打印机消化 Windows 队列中已有的任务",
+        "spool.stage.restarting": "阶段 3/3：正在重启 Print Spooler 服务",
+        "spool.stage.waiting_sends": "阶段 1/3：等待 InkSwarm 完成正在进行的提交",
+        "spool.stage_elapsed": "本阶段已等待 {seconds} 秒。",
         "spool.stays_paused": "\n\nInkSwarm 已保持暂停状态，请确认后再选择恢复、停止或重新尝试。",
         "spool.unknown_error": "未知错误",
         "spooler.dependency_import_failed": "Windows 打印依赖导入失败: {error}",
