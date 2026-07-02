@@ -59,6 +59,7 @@ def _make_fake_print_client(control: _SpoolerControl, block: bool):
     class _FakePrintClient:
         def __init__(self, language: str = "en", log_callback=None) -> None:
             self._terminated = False
+            self._kill_pending = False
 
         def print_copy(
             self,
@@ -73,13 +74,20 @@ def _make_fake_print_client(control: _SpoolerControl, block: bool):
             control.send_started.set()
             if block and not control.release.wait(timeout=30):
                 raise RuntimeError("test print client was never released")
-            if self._terminated:
+            if self._terminated or self._kill_pending:
                 # Mirrors the real client: a killed helper surfaces as an error.
+                self._kill_pending = False
                 raise RuntimeError("print helper terminated")
             control.copies_sent += 1
 
         def terminate(self) -> None:
             self._terminated = True
+            control.release.set()
+
+        def kill_inflight(self) -> None:
+            # Mirrors the real client: only the current submission fails; the
+            # helper restarts for later copies.
+            self._kill_pending = True
             control.release.set()
 
         def close(self) -> None:
@@ -112,7 +120,13 @@ class RunLifecycleTests(TestCase):
         self.states: list[str] = []
         self.controller.signals.run_state.connect(self.states.append, Qt.ConnectionType.DirectConnection)
 
-    def _run_with_fakes(self, control: _SpoolerControl, block: bool, run_options: RunOptions) -> None:
+    def _run_with_fakes(
+        self,
+        control: _SpoolerControl,
+        block: bool,
+        run_options: RunOptions,
+        tasks: list[TaskItem] | None = None,
+    ) -> None:
         self.addCleanup(control.release.set)
         for target, replacement in (
             ("Renderer", _FakeRenderer),
@@ -122,7 +136,7 @@ class RunLifecycleTests(TestCase):
             patcher = mock.patch.object(controller_module, target, replacement)
             patcher.start()
             self.addCleanup(patcher.stop)
-        self.controller.start([_task()], [_worker()], run_options)
+        self.controller.start(tasks if tasks is not None else [_task()], [_worker()], run_options)
 
     def _assert_truthful_stop(self, control: _SpoolerControl) -> None:
         self.assertTrue(control.send_started.wait(10), "fake spooler send never started")
@@ -167,6 +181,34 @@ class RunLifecycleTests(TestCase):
         # The killed copy was never recorded as a success.
         self.assertEqual(control.copies_sent, 0)
         self.assertEqual(self.states, [RUN_STATE_RUNNING, RUN_STATE_STOPPING, RUN_STATE_IDLE])
+
+    def test_maintenance_kill_interrupts_send_but_run_survives_paused(self) -> None:
+        control = _SpoolerControl()
+        # Two tasks: the first blocks inside its send and gets killed; the
+        # second must still print after the user resumes.
+        self._run_with_fakes(control, block=True, run_options=RunOptions(), tasks=[_task(), _task()])
+        self.assertTrue(control.send_started.wait(10), "fake print client send never started")
+
+        self.controller.pause()
+        killed = self.controller.force_terminate_in_flight()
+        self.assertEqual(killed, 1)
+        self.assertTrue(_wait_until(lambda: self.controller.active_spool_send_count() == 0))
+
+        # The run survived the kill: still alive, still paused, never STOPPING.
+        self.assertTrue(self.controller.is_running())
+        self.assertTrue(self.controller.is_paused())
+        self.assertEqual(self.states, [RUN_STATE_RUNNING])
+        self.assertEqual(control.copies_sent, 0)
+
+        self.controller.resume()
+        self.assertTrue(_wait_until(lambda: RUN_STATE_IDLE in self.states))
+        self.assertTrue(_wait_until(lambda: not self.controller.is_running()))
+        # Only the interrupted copy failed; the second task printed normally.
+        self.assertEqual(control.copies_sent, 1)
+        self.assertEqual(self.states, [RUN_STATE_RUNNING, RUN_STATE_IDLE])
+
+    def test_maintenance_kill_is_a_noop_when_idle(self) -> None:
+        self.assertEqual(self.controller.force_terminate_in_flight(), 0)
 
     def test_normal_completion_goes_straight_to_idle(self) -> None:
         control = _SpoolerControl()

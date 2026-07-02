@@ -157,6 +157,16 @@ class WorkerRuntime(threading.Thread):
         """
         self.print_client.terminate()
 
+    def kill_inflight_submission(self) -> None:
+        """Interrupt this worker's in-flight print submission, keeping it usable.
+
+        Print-queue maintenance variant of force_terminate(): the interrupted
+        batch fails through the normal error path, but the helper client is
+        not latched shut, so the worker can still print later copies once the
+        run resumes.
+        """
+        self.print_client.kill_inflight()
+
     def run(self) -> None:
         self.spooler = PrinterSpooler(language=self.run_options.language)
         try:
@@ -500,6 +510,27 @@ class PrintController:
         printui_killed = terminate_active_printui()
         debug_log(f"controller force stop terminated helpers={terminated} printui={printui_killed}")
 
+    def force_terminate_in_flight(self) -> int:
+        """Kill in-flight print submissions without stopping the run.
+
+        Print-queue maintenance path: unlike force_stop(), the stop event is
+        not set and the pause state is untouched, so the run survives — the
+        interrupted batches fail through the normal error path and the workers
+        go back to waiting at the pause gate. Interrupted copies were never
+        recorded as successes, so they count as failed. Returns the number of
+        workers whose helper was killed.
+        """
+        if not self.is_running():
+            return 0
+        killed = 0
+        for runtime in list(self._runtimes):
+            if runtime.is_alive():
+                runtime.kill_inflight_submission()
+                killed += 1
+        printui_killed = terminate_active_printui()
+        debug_log(f"controller maintenance kill helpers={killed} printui={printui_killed}")
+        return killed
+
     def pause(self) -> None:
         if not self.is_running() or self.is_paused():
             return
@@ -674,6 +705,10 @@ class PrintController:
             self._active_spool_sends = max(0, self._active_spool_sends - 1)
             debug_log(f"controller active spool sends={self._active_spool_sends}")
             self._spool_activity.notify_all()
+
+    def active_spool_send_count(self) -> int:
+        with self._spool_activity:
+            return self._active_spool_sends
 
     def wait_until_paused_idle(self, timeout_seconds: float = 15.0, quiet_seconds: float = 0.3) -> bool:
         deadline = time.monotonic() + max(0.1, timeout_seconds)
