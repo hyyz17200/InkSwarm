@@ -21,13 +21,57 @@ from .statistics_writer import MonthlyStatisticsWriter, StatisticsTaskRecord
 from .tail_balance import TailBalanceAssignment, TailBalanceCoordinator
 
 
+# Run lifecycle states reported through ControllerSignals.run_state. The GUI must
+# treat this signal as the single source of truth for run-dependent widget state.
+#   RUNNING  : a run is dispatching and printing.
+#   STOPPING : stop was requested but at least one worker may still be inside an
+#              uninterruptible send (e.g. a GDI call blocked in the driver);
+#              nothing new is dispatched, but paper can still reach a printer.
+#   IDLE     : all worker threads have exited and statistics are finalized.
+RUN_STATE_RUNNING = "running"
+RUN_STATE_STOPPING = "stopping"
+RUN_STATE_IDLE = "idle"
+
+
 class ControllerSignals(QObject):
     log = Signal(object)
     task_status = Signal(object)
     worker_status = Signal(object)
-    run_state = Signal(bool)
+    run_state = Signal(str)
     pause_state = Signal(bool)
     spool_progress = Signal(int, int)
+
+
+class _BatchDrainTracker:
+    """Stop-aware replacement for queue.Queue.join() in static scheduling mode.
+
+    queue.Queue.join() cannot be interrupted, so a worker stuck inside an
+    uninterruptible send would block the controller thread forever and the run
+    could never even reach its stopping/finalizing phase. This tracker counts
+    outstanding batches and lets the drain wait bail out as soon as the stop
+    event is set.
+    """
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._outstanding = 0
+
+    def add(self) -> None:
+        with self._condition:
+            self._outstanding += 1
+
+    def done(self) -> None:
+        with self._condition:
+            self._outstanding = max(0, self._outstanding - 1)
+            self._condition.notify_all()
+
+    def wait_drained(self, stop_event: threading.Event) -> bool:
+        with self._condition:
+            while self._outstanding > 0:
+                if stop_event.is_set():
+                    return False
+                self._condition.wait(0.1)
+        return True
 
 
 class _PauseGate:
@@ -75,10 +119,12 @@ class WorkerRuntime(threading.Thread):
         pause_gate: _PauseGate,
         run_options: RunOptions,
         tail_coordinator: TailBalanceCoordinator | None = None,
+        drain_tracker: _BatchDrainTracker | None = None,
     ) -> None:
         super().__init__(daemon=True, name=f"WorkerRuntime-{worker.name}")
         self.worker = worker
         self.job_queue = job_queue
+        self.drain_tracker = drain_tracker
         self.signals = signals
         self.renderer = renderer
         self.printer_access = printer_access
@@ -144,7 +190,6 @@ class WorkerRuntime(threading.Thread):
         assert self.job_queue is not None
         batch = self.job_queue.get()
         if batch is None:
-            self.job_queue.task_done()
             return None
         return TailBalanceAssignment(batch=batch, active_id=None)
 
@@ -152,8 +197,8 @@ class WorkerRuntime(threading.Thread):
         if self.tail_coordinator is not None and assignment.active_id is not None:
             self.tail_coordinator.complete_assignment(self.worker.name, assignment.active_id)
             return
-        assert self.job_queue is not None
-        self.job_queue.task_done()
+        assert self.drain_tracker is not None
+        self.drain_tracker.done()
 
     def _process_batch(self, batch: WorkerTaskBatch, active_id: int | None = None) -> None:
         preset = self.worker.get_active_preset()
@@ -304,6 +349,8 @@ class PrintController:
         self._language = "en"
         self._spool_target = 0
         self._spool_progress = 0
+        self._run_state = RUN_STATE_IDLE
+        self._run_state_lock = threading.Lock()
         self._flush_pending_statistics("startup", emit_log=False)
 
     def is_running(self) -> bool:
@@ -317,6 +364,23 @@ class PrintController:
 
     def is_paused(self) -> bool:
         return self._pause_gate.is_paused()
+
+    def run_state(self) -> str:
+        with self._run_state_lock:
+            return self._run_state
+
+    def _emit_run_state(self, state: str) -> None:
+        # Deduplicated, monotonic-per-run state reporting. STOPPING may only
+        # follow RUNNING so a stop() racing a natural run end can never leave
+        # the GUI stuck on a stale "stopping" after IDLE was already reported.
+        with self._run_state_lock:
+            if state == self._run_state:
+                return
+            if state == RUN_STATE_STOPPING and self._run_state != RUN_STATE_RUNNING:
+                return
+            self._run_state = state
+        debug_log(f"controller run state -> {state}")
+        self.signals.run_state.emit(state)
 
     def _t(self, key: str, **kwargs: object) -> str:
         return translate(self._language, key, **kwargs)
@@ -367,13 +431,18 @@ class PrintController:
         self.signals.spool_progress.emit(0, self._spool_target)
         debug_log(f"controller start tasks={len(tasks)} workers={len(workers)} spool_target={self._spool_target} options={options}")
         self._thread = threading.Thread(target=self._run, args=(tasks, workers, options), daemon=True, name="PrintControllerMain")
+        # Report RUNNING before the thread starts so a very short run can never
+        # emit IDLE first and have this RUNNING arrive afterwards.
+        self._emit_run_state(RUN_STATE_RUNNING)
         self._thread.start()
-        self.signals.run_state.emit(True)
 
     def stop(self) -> None:
         debug_log("controller stop requested")
         self._stop_event.set()
         self._set_paused(False)
+        # Immediate, truthful feedback: the run is stopping, not stopped. IDLE
+        # is only reported by _run() once every worker thread has exited.
+        self._emit_run_state(RUN_STATE_STOPPING)
         self.signals.log.emit(LogMessage("warning", self._t("controller.stop_requested")))
 
     def pause(self) -> None:
@@ -435,6 +504,7 @@ class PrintController:
             if run_options.tail_balance_enabled
             else None
         )
+        drain_tracker = _BatchDrainTracker() if tail_coordinator is None else None
 
         try:
             for worker in active_workers:
@@ -455,6 +525,7 @@ class PrintController:
                     pause_gate=self._pause_gate,
                     run_options=run_options,
                     tail_coordinator=tail_coordinator,
+                    drain_tracker=drain_tracker,
                 )
                 runtime.start()
                 runtimes.append(runtime)
@@ -484,6 +555,8 @@ class PrintController:
                     if tail_coordinator is not None:
                         tail_coordinator.add_batch(batch)
                     else:
+                        assert drain_tracker is not None
+                        drain_tracker.add()
                         queues[batch.worker_name].put(batch)
                     self.signals.log.emit(
                         LogMessage(
@@ -503,8 +576,8 @@ class PrintController:
                 tail_coordinator.close_dispatch()
                 tail_coordinator.wait_until_done(stop_event)
             else:
-                for q in queues.values():
-                    q.join()
+                assert drain_tracker is not None
+                drain_tracker.wait_drained(stop_event)
         finally:
             debug_log("controller run finalizing")
             if tail_coordinator is not None:
@@ -512,12 +585,29 @@ class PrintController:
             else:
                 for q in queues.values():
                     q.put(None)
+            if stop_event.is_set():
+                self._emit_run_state(RUN_STATE_STOPPING)
+            # Grace period for workers to exit on their own (the normal case).
+            deadline = time.monotonic() + 2.0
             for runtime in runtimes:
-                runtime.join(timeout=2)
+                runtime.join(timeout=max(0.05, deadline - time.monotonic()))
+            stuck = [runtime for runtime in runtimes if runtime.is_alive()]
+            if stuck:
+                # At least one worker is still inside an uninterruptible send
+                # (e.g. a GDI call blocked in the driver). Report a truthful
+                # STOPPING state and wait for real thread exit: IDLE must never
+                # be claimed while a worker can still reach a printer, and the
+                # summary/statistics below must only run once no more copies
+                # can complete.
+                self._emit_run_state(RUN_STATE_STOPPING)
+                debug_log(f"controller waiting for stuck workers: {[r.name for r in stuck]}")
+                self.signals.log.emit(LogMessage("warning", self._t("controller.stopping_wait", count=len(stuck))))
+                for runtime in runtimes:
+                    runtime.join()
             self._set_paused(False)
             self._emit_summary(tasks)
             self._finish_statistics_run()
-            self.signals.run_state.emit(False)
+            self._emit_run_state(RUN_STATE_IDLE)
 
     def _begin_spool_send(self) -> None:
         with self._spool_activity:

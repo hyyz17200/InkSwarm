@@ -46,7 +46,12 @@ from PySide6.QtWidgets import (
 )
 
 from .config_store import ConfigStore
-from .controller import PrintController
+from .controller import (
+    RUN_STATE_IDLE,
+    RUN_STATE_RUNNING,
+    RUN_STATE_STOPPING,
+    PrintController,
+)
 from .cache_service import CacheService
 from .i18n import language_options, normalize_language, translate
 from .local_logger import LocalLogWriter, RegularLogFilter
@@ -195,6 +200,10 @@ class MainWindow(QMainWindow):
         self._spool_total = 0
         self._spooler_maintenance_active = False
         self.worker_config_error: str | None = None
+        # Mirror of the last run_state signal; the single source of truth for
+        # run-dependent widget state (never mix with live is_running() checks,
+        # which can disagree while a stuck worker is still draining).
+        self._run_state: str = RUN_STATE_IDLE
 
         self._saved_ui_scale = int(self.app_settings.get("ui_scale", 100))
         self._ui_scale_applied_once = False
@@ -963,7 +972,7 @@ class MainWindow(QMainWindow):
         self.btn_open_pref.setText(self.t("actions.open_driver_preferences"))
         self.btn_open_props.setText(self.t("actions.open_printer_properties"))
         self.btn_capture.setText(self.t("actions.save_driver_settings"))
-        self.stop_button.setText(self.t("actions.stop"))
+        self._refresh_stop_button_text()
         self._refresh_start_button_text()
         self._set_spool_progress_text(self.spool_progress_bar.value())
 
@@ -989,11 +998,15 @@ class MainWindow(QMainWindow):
             self.refresh_statistics_table(force=True)
 
     def _refresh_start_button_text(self) -> None:
-        if self.controller.is_running():
+        if self._run_state == RUN_STATE_RUNNING:
             key = "actions.resume" if self.controller.is_paused() else "actions.pause"
         else:
             key = "actions.start"
         self.start_button.setText(self.t(key))
+
+    def _refresh_stop_button_text(self) -> None:
+        key = "actions.stopping" if self._run_state == RUN_STATE_STOPPING else "actions.stop"
+        self.stop_button.setText(self.t(key))
 
     def _set_spool_progress_text(self, sent: int) -> None:
         self.spool_progress_label.setText(self.t("spool.progress", sent=int(sent), total=self._spool_total))
@@ -1292,7 +1305,7 @@ class MainWindow(QMainWindow):
         item.setToolTip(display_status)
 
     def refresh_task_table(self) -> None:
-        task_editing_enabled = not self.controller.is_running()
+        task_editing_enabled = self._run_state == RUN_STATE_IDLE
         self.task_table.setRowCount(len(self.tasks))
         self.task_row_by_id.clear()
         for row, task in enumerate(self.tasks):
@@ -1875,16 +1888,28 @@ class MainWindow(QMainWindow):
             return
         self._set_worker_status_item(row, status.status)
 
-    def on_run_state_changed(self, running: bool) -> None:
-        self.start_button.setEnabled(True)
+    def on_run_state_changed(self, state: str) -> None:
+        self._run_state = state
+        running = state == RUN_STATE_RUNNING
+        stopping = state == RUN_STATE_STOPPING
+        idle = state == RUN_STATE_IDLE
+        # While stopping, neither starting nor another stop makes sense: the
+        # run only truly ends (IDLE) once every worker thread has exited.
+        self.start_button.setEnabled(not stopping)
         self.stop_button.setEnabled(running)
-        self._set_task_editing_enabled(not running)
+        self._refresh_stop_button_text()
+        self._set_task_editing_enabled(idle)
         if running:
             self.spool_progress_bar.setValue(0)
         self._refresh_start_button_text()
         self.refresh_task_table()
-        self.on_log_text(self.t("log.flow_started" if running else "log.flow_ended"))
-        if not running and self._statistics_card_context() is not None:
+        if running:
+            self.on_log_text(self.t("log.flow_started"))
+        elif stopping:
+            self.on_log_text(self.t("log.flow_stopping"))
+        else:
+            self.on_log_text(self.t("log.flow_ended"))
+        if idle and self._statistics_card_context() is not None:
             self.refresh_statistics_table(force=True)
 
     def on_pause_state_changed(self, paused: bool) -> None:
