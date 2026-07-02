@@ -186,6 +186,9 @@ _TRANSLATIONS: Mapping[str, Mapping[str, str]] = {
             "This operation requires administrator permission. The main window can stay non-elevated; "
             "InkSwarm will request temporary administrator permission when needed."
         ),
+        "spool.drain_all_clear": "All observed printer queues are empty.",
+        "spool.drain_wait_log": "Waiting for the Windows print queue to drain on: {printers}",
+        "spool.force_kill_log": "Force-terminated {count} in-flight submission(s); interrupted copies count as failed.",
         "spool.maintenance_active": "Print queue maintenance is running. Please wait until it finishes.",
         "spool.maintenance_failed": "Print Queue Maintenance Failed",
         "spool.maintenance_pause_log": "Preparing print queue maintenance. InkSwarm is pausing sending.",
@@ -198,6 +201,7 @@ _TRANSLATIONS: Mapping[str, Mapping[str, str]] = {
         "spool.restart_complete": "Windows Print Spooler has restarted.",
         "spool.restart_complete_title": "Print Queue Restored",
         "spool.restart_running": "Print queue maintenance is running. Sending will not resume until it finishes.",
+        "spool.skip_drain_log": "Queue drain skipped with {count} job(s) remaining ({printers}). The spooler will resume them after the restart.",
         "spool.stays_paused": "\n\nInkSwarm remains paused. Confirm the state, then choose resume, stop, or retry.",
         "spool.unknown_error": "Unknown error",
         "spooler.dependency_import_failed": "Windows printing dependencies failed to import: {error}",
@@ -478,6 +482,9 @@ _TRANSLATIONS: Mapping[str, Mapping[str, str]] = {
             "重启过程中所有打印机都可能短暂不可用。\n\n"
             "此操作需要管理员权限。主窗口可以保持普通权限运行，InkSwarm 会在需要时临时请求管理员权限。"
         ),
+        "spool.drain_all_clear": "观测的打印机队列已全部排空。",
+        "spool.drain_wait_log": "等待以下打印机的 Windows 队列排空：{printers}",
+        "spool.force_kill_log": "已强制终止 {count} 个进行中的提交，被中断的拷贝按失败计。",
         "spool.maintenance_active": "打印队列维护正在执行，请等待完成。",
         "spool.maintenance_failed": "打印队列维护失败",
         "spool.maintenance_pause_log": "准备维护打印队列，InkSwarm 正在暂停发送。",
@@ -490,6 +497,7 @@ _TRANSLATIONS: Mapping[str, Mapping[str, str]] = {
         "spool.restart_complete": "Windows Print Spooler 已重启完成。",
         "spool.restart_complete_title": "打印队列已恢复",
         "spool.restart_running": "正在维护打印队列，完成前不会恢复发送。",
+        "spool.skip_drain_log": "已跳过队列排空，剩余 {count} 个任务（{printers}），重启后将由系统继续处理。",
         "spool.stays_paused": "\n\nInkSwarm 已保持暂停状态，请确认后再选择恢复、停止或重新尝试。",
         "spool.unknown_error": "未知错误",
         "spooler.dependency_import_failed": "Windows 打印依赖导入失败: {error}",
