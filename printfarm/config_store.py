@@ -129,18 +129,14 @@ class ConfigStore:
         worker.directory.mkdir(parents=True, exist_ok=True)
         worker.preset_dir.mkdir(parents=True, exist_ok=True)
         worker.worker_file.write_text(json.dumps(worker.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
-        existing_files = {p.resolve() for p in worker.preset_dir.glob("*.json")}
-        written_files: set[Path] = set()
+        # Presets are authored directly on disk (the GUI has no preset editor),
+        # so only rewrite the presets this process loaded and never delete other
+        # .json files: a preset file added while the app is running must survive
+        # a save/close that happens before the next worker reload.
         for preset in worker.presets.values():
             target = preset.file_path or (worker.preset_dir / f"{preset.name}.json")
             preset.file_path = target
             target.write_text(json.dumps(preset.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
-            written_files.add(target.resolve())
-        for old_file in existing_files - written_files:
-            try:
-                old_file.unlink(missing_ok=True)
-            except Exception:
-                pass
 
     def save_workers(self, workers: Iterable[WorkerConfig]) -> None:
         for worker in workers:
