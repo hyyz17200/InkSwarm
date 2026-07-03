@@ -25,6 +25,20 @@ _STUCK_HELPER_STUB = (
     "    time.sleep(600)\n"
 )
 
+# Stand-in helper that relays a debug line (the way the real helper forwards
+# its debug_log output) before confirming the copy.
+_DEBUG_EVENT_HELPER_STUB = (
+    "import json, sys\n"
+    "sys.stdout.write(json.dumps({'event': 'ready'}) + '\\n')\n"
+    "sys.stdout.flush()\n"
+    "for line in sys.stdin:\n"
+    "    if json.loads(line).get('cmd') == 'exit':\n"
+    "        break\n"
+    "    sys.stdout.write(json.dumps({'event': 'debug', 'message': 'draw page rect=(0,0,1,1)'}) + '\\n')\n"
+    "    sys.stdout.write(json.dumps({'event': 'done'}) + '\\n')\n"
+    "    sys.stdout.flush()\n"
+)
+
 
 @unittest.skipUnless(sys.platform == "win32", "print helper requires Windows printing APIs")
 class PrintHelperProcessTests(unittest.TestCase):
@@ -145,6 +159,45 @@ class PrintHelperProcessTests(unittest.TestCase):
             self.assertIsNotNone(killed_proc.poll())
             self.assertIsNot(client._proc, killed_proc)
             self.assertIsNone(client._proc.poll())
+
+    def test_debug_events_are_relayed_and_not_treated_as_protocol_answers(self) -> None:
+        captured: list[str] = []
+        with mock.patch.object(
+            print_helper_module,
+            "_print_helper_command",
+            lambda language: [sys.executable, "-c", _DEBUG_EVENT_HELPER_STUB],
+        ), mock.patch.object(print_helper_module, "debug_log", captured.append):
+            client = PrintHelperClient(language="en")
+            self.addCleanup(client.terminate)
+            client.print_copy(
+                printer_name="Printer P1",
+                job_name="debug job",
+                page_paths=[],
+                page_specs=[],
+                ignore_margins=True,
+                fit_mode="actual",
+            )
+            client.close()
+        self.assertTrue(any("draw page rect=(0,0,1,1)" in line for line in captured))
+
+    def test_real_helper_forwards_spooler_debug_lines(self) -> None:
+        # The helper has no debug file of its own: its submit-path debug_log
+        # lines must arrive in the parent as relayed "debug" events.
+        captured: list[str] = []
+        with mock.patch.object(print_helper_module, "debug_log", captured.append):
+            client = PrintHelperClient(language="en")
+            self.addCleanup(client.terminate)
+            with self.assertRaises(RuntimeError):
+                client.print_copy(
+                    printer_name="InkSwarm-NoSuchPrinter-__test__",
+                    job_name="debug relay probe",
+                    page_paths=[],
+                    page_specs=[],
+                    ignore_margins=True,
+                    fit_mode="actual",
+                )
+            client.close()
+        self.assertTrue(any("spooler print start" in line for line in captured))
 
     def test_terminate_surfaces_as_force_stopped_error(self) -> None:
         client = PrintHelperClient(language="en")

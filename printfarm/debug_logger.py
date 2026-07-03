@@ -7,11 +7,21 @@ import sys
 import threading
 import time
 import traceback
-from typing import TextIO
+from typing import Callable, TextIO
 
 _debug_lock = threading.Lock()
 _debug_file_handle: TextIO | None = None
 _debug_file_path: Path | None = None
+
+# Alternative sink for processes that own no debug file (helper subprocesses):
+# when set, debug_log() hands the raw message to this callable instead of
+# writing to disk, so the parent process can merge it into the main debug.log.
+_debug_forwarder: Callable[[str], None] | None = None
+
+
+def set_debug_forwarder(forwarder: Callable[[str], None] | None) -> None:
+    global _debug_forwarder
+    _debug_forwarder = forwarder
 
 # Block-buffered writes: instead of flushing every line (a syscall per line held
 # under _debug_lock, which couples worker threads to disk latency), we let the OS
@@ -41,6 +51,13 @@ def initialize_debug_logging(logs_dir: Path) -> Path:
 
 
 def debug_log(message: str) -> None:
+    forwarder = _debug_forwarder
+    if forwarder is not None:
+        try:
+            forwarder(message.rstrip())
+        except Exception:
+            pass
+        return
     handle = _debug_file_handle
     if handle is None:
         return

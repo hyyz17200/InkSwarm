@@ -8,7 +8,7 @@ import subprocess
 import sys
 import threading
 
-from .debug_logger import debug_exception, debug_log
+from .debug_logger import debug_exception, debug_log, set_debug_forwarder
 from .i18n import normalize_language, translate
 
 # The actual GDI submission runs in a dedicated helper subprocess, not in a
@@ -28,6 +28,13 @@ from .i18n import normalize_language, translate
 #                      {"event": "job_started", "job_id"}    right after StartDoc
 #                      {"event": "done"}                     copy submitted
 #                      {"event": "error", "message"}         copy failed
+#                      {"event": "debug", "message"}         debug line to relay
+#
+# The helper has no debug file of its own, so its debug_log() lines (draw
+# rects, predecode decisions, exception tracebacks from the submit path) are
+# forwarded as "debug" events and written into the parent's debug.log, keeping
+# them in the run's timeline. Helper stderr is drained to debug.log as well so
+# a hard crash still leaves a trace.
 
 
 def _print_helper_command(language: str) -> list[str]:
@@ -94,15 +101,22 @@ class PrintHelperClient:
                     command,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
                     text=True,
                     encoding="utf-8",
+                    errors="replace",
                     bufsize=1,
                     creationflags=creationflags,
                 )
             except Exception as exc:
                 raise RuntimeError(self._t("print_helper.start_failed", error=exc)) from exc
             proc = self._proc
+            threading.Thread(
+                target=self._drain_stderr,
+                args=(proc,),
+                daemon=True,
+                name=f"PrintHelperStderr-{proc.pid}",
+            ).start()
         event = self._read_event(proc)
         if event.get("event") == "ready":
             debug_log(f"print helper ready pid={proc.pid}")
@@ -160,16 +174,39 @@ class PrintHelperClient:
 
     def _read_event(self, proc: subprocess.Popen[str]) -> dict[str, Any]:
         assert proc.stdout is not None
-        line = proc.stdout.readline()
-        if not line:
-            raise self._exit_error(proc)
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                raise self._exit_error(proc)
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(self._t("print_helper.protocol_error", line=line.strip())) from exc
+            if not isinstance(data, dict):
+                raise RuntimeError(self._t("print_helper.protocol_error", line=line.strip()))
+            # Relayed helper debug lines land in the parent's debug.log so the
+            # submit-path diagnostics stay in the run's timeline; they are not
+            # protocol answers, so keep reading.
+            if data.get("event") == "debug":
+                debug_log(f"print helper[{proc.pid}] {data.get('message', '')}")
+                continue
+            return data
+
+    @staticmethod
+    def _drain_stderr(proc: subprocess.Popen[str]) -> None:
+        """Relay helper stderr into debug.log (crash tracebacks would otherwise
+        vanish; the pipe must be drained anyway so it can never fill and block
+        the helper)."""
+        stream = proc.stderr
+        if stream is None:
+            return
         try:
-            data = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(self._t("print_helper.protocol_error", line=line.strip())) from exc
-        if not isinstance(data, dict):
-            raise RuntimeError(self._t("print_helper.protocol_error", line=line.strip()))
-        return data
+            for line in stream:
+                text = line.rstrip()
+                if text:
+                    debug_log(f"print helper[{proc.pid}] stderr: {text}")
+        except Exception as exc:
+            debug_exception("PrintHelperClient._drain_stderr", exc)
 
     def _exit_error(self, proc: subprocess.Popen[str]) -> RuntimeError:
         """Build the error for a dead helper, cleaning up its interrupted job first.
@@ -285,6 +322,11 @@ def main(argv: list[str] | None = None) -> int:
     def emit(payload: dict[str, Any]) -> None:
         out.write(json.dumps(payload, ensure_ascii=False) + "\n")
         out.flush()
+
+    # This process has no debug file; ship debug_log() lines (draw rects,
+    # predecode decisions, submit-path exceptions) to the parent instead,
+    # which writes them into the main debug.log.
+    set_debug_forwarder(lambda message: emit({"event": "debug", "message": message}))
 
     try:
         from .spooler import PrinterSpooler
