@@ -33,6 +33,38 @@ def worker(root: Path) -> WorkerConfig:
     )
 
 
+class RendererExifOrientationTests(TestCase):
+    def test_exif_orientation_is_applied_before_caching(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "rotated.jpg"
+            exif = Image.Exif()
+            exif[0x0112] = 6  # stored rotated 90°: viewers rotate it upright
+            Image.new("RGB", (40, 20), (200, 10, 10)).save(image_path, exif=exif.tobytes(), dpi=(100, 100))
+            renderer = RecordingRenderer(root / "cache", rip_limit_enabled=False)
+
+            artifact = renderer.ensure_render_cache(TaskItem(file_path=image_path), worker(root))
+
+            # Upright pixels: width/height swapped relative to the stored bitmap.
+            with Image.open(artifact.page_paths[0]) as output:
+                self.assertEqual(output.size, (20, 40))
+            page = artifact.metadata["pages"][0]
+            self.assertAlmostEqual(page["width_mm"], 20 / 100 * 25.4, places=2)
+            self.assertAlmostEqual(page["height_mm"], 40 / 100 * 25.4, places=2)
+
+    def test_image_without_orientation_tag_is_unchanged(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "plain.jpg"
+            Image.new("RGB", (40, 20), (10, 200, 10)).save(image_path, dpi=(100, 100))
+            renderer = RecordingRenderer(root / "cache", rip_limit_enabled=False)
+
+            artifact = renderer.ensure_render_cache(TaskItem(file_path=image_path), worker(root))
+
+            with Image.open(artifact.page_paths[0]) as output:
+                self.assertEqual(output.size, (40, 20))
+
+
 class RendererImageRipPreshrinkTests(TestCase):
     def test_large_image_is_preshrunk_before_color_transform_then_final_limited(self) -> None:
         with TemporaryDirectory() as tmp:

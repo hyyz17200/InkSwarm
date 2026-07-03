@@ -27,7 +27,7 @@ from .models import (
     stable_hash,
 )
 from .debug_logger import debug_exception, debug_log
-from .task_inspector import MM_PER_INCH, PDF_POINTS_PER_INCH, get_image_dpi
+from .task_inspector import MM_PER_INCH, PDF_POINTS_PER_INCH, apply_exif_orientation, get_image_dpi
 
 Image.MAX_IMAGE_PIXELS = None
 # Do NOT enable ImageFile.LOAD_TRUNCATED_IMAGES: incomplete or corrupt bitmaps must
@@ -188,7 +188,10 @@ class Renderer:
         """
         output_icc_path = worker.resolve_path(preset.output_icc) if preset.output_icc else None
         return {
-            "cache_schema": 4,
+            # Schema 5: bitmap input applies the EXIF Orientation tag before
+            # rendering, so caches produced by older schemas may hold rotated
+            # pixels and must not be reused.
+            "cache_schema": 5,
             "cache_image_format": self.cache_image_format,
             "source": self._source_signature(task.file_path),
             "dpi": int(preset.dpi),
@@ -293,6 +296,9 @@ class Renderer:
 
     def _render_image_file(self, image_path: Path, cache_dir: Path, worker: WorkerConfig, preset: PresetConfig) -> list[PageRenderInfo]:
         with Image.open(image_path) as image:
+            # EXIF orientation first: every later step (mm size, auto-orient,
+            # RIP limit, the cached bitmap itself) must see the upright pixels.
+            image = apply_exif_orientation(image)
             dpi_x, dpi_y = get_image_dpi(image)
             width_mm = image.width / dpi_x * MM_PER_INCH
             height_mm = image.height / dpi_y * MM_PER_INCH

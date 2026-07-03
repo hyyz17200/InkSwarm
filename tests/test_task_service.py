@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
@@ -209,3 +210,20 @@ class TaskInspectionLocalizationTests(TestCase):
 
             with self.assertRaisesRegex(TaskInspectionError, "CMYK file has no embedded ICC"):
                 inspect_task_input(image_path, cmyk_fallback_icc=missing_fallback)
+
+
+class TaskInspectionExifOrientationTests(TestCase):
+    def test_exif_orientation_affects_size_and_preview(self) -> None:
+        # A camera-style JPEG stored rotated (Orientation=6) must be inspected
+        # upright: the mm size and the preview both follow what viewers show.
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "rotated.jpg"
+            exif = Image.Exif()
+            exif[0x0112] = 6
+            Image.new("RGB", (40, 20), (200, 10, 10)).save(image_path, exif=exif.tobytes(), dpi=(100, 100))
+
+            inspection = inspect_task_input(image_path)
+
+            self.assertEqual(inspection.display_size_mm, "5 × 10 mm")
+            with Image.open(BytesIO(inspection.preview_bytes)) as preview:
+                self.assertEqual(preview.size, (20, 40))

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pypdfium2 as pdfium
-from PIL import Image, ImageCms
+from PIL import Image, ImageCms, ImageOps
 
 from .i18n import normalize_language, translate
 from .models import DEFAULT_RASTER_DPI
@@ -88,6 +88,7 @@ def _inspect_image(
                 image.load()
             except OSError as exc:
                 raise TaskInspectionError(translate(language, "task_inspector.truncated")) from exc
+            image = apply_exif_orientation(image)
             mode = image.mode
             embedded_profile = image.info.get("icc_profile")
             # CMYK can only be interpreted with an embedded profile or, failing
@@ -107,6 +108,28 @@ def _inspect_image(
         raise
     except Exception as exc:
         raise TaskInspectionError(str(exc)) from exc
+
+
+def apply_exif_orientation(image: Image.Image) -> Image.Image:
+    """Apply the EXIF Orientation tag so pixels match what image viewers show.
+
+    Cameras and phones commonly store the raw sensor bitmap plus an
+    Orientation tag; without applying it, sizing, preview and print all use
+    the unrotated pixels and the output comes out rotated/mirrored relative
+    to what every viewer displays. Returns the image unchanged when there is
+    no tag or it is the identity (the common case for production artwork),
+    so no extra decode/copy happens on that path. Pillow preserves the info
+    dict (dpi, icc_profile) across the transpose and drops the consumed
+    Orientation tag from the result's EXIF.
+    """
+    try:
+        orientation = image.getexif().get(0x0112)
+    except Exception:
+        return image
+    if not orientation or orientation == 1:
+        return image
+    transposed = ImageOps.exif_transpose(image)
+    return transposed if transposed is not None else image
 
 
 def get_image_dpi(image: Image.Image) -> tuple[float, float]:
