@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+import subprocess
 import sys
 import threading
 import time
@@ -9,6 +13,28 @@ from unittest import mock
 from printfarm import print_helper as print_helper_module
 from printfarm import spooler as spooler_module
 from printfarm.print_helper import PrintHelperClient
+
+
+_UNICODE_PROTOCOL_HELPER_STUB = r"""
+import sys
+import types
+
+spooler_module = types.ModuleType("printfarm.spooler")
+
+class PrinterSpooler:
+    def __init__(self, language):
+        sys.stderr.write("辅助进程错误流\n")
+        sys.stderr.flush()
+
+    def print_single_copy(self, **kwargs):
+        raise RuntimeError(f"{kwargs['job_name']}|{kwargs['page_paths'][0]}")
+
+spooler_module.PrinterSpooler = PrinterSpooler
+sys.modules["printfarm.spooler"] = spooler_module
+
+from printfarm.print_helper import main
+raise SystemExit(main([]))
+"""
 
 # Stand-in helper process: acknowledges startup, then on the first print
 # command reports a job id and blocks forever — the shape of a GDI submit
@@ -38,6 +64,50 @@ _DEBUG_EVENT_HELPER_STUB = (
     "    sys.stdout.write(json.dumps({'event': 'done'}) + '\\n')\n"
     "    sys.stdout.flush()\n"
 )
+
+
+class PrintHelperEncodingTests(unittest.TestCase):
+    def test_helper_protocol_forces_utf8_for_all_standard_streams(self) -> None:
+        env = os.environ.copy()
+        # Reproduce a Chinese-locale child even when the test host itself uses
+        # UTF-8.  main() must override this for all three redirected streams.
+        env["PYTHONIOENCODING"] = "cp936:replace"
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _UNICODE_PROTOCOL_HELPER_STUB],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            env=env,
+        )
+        self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
+        assert proc.stdin is not None
+        assert proc.stdout is not None
+        assert proc.stderr is not None
+
+        self.assertEqual(json.loads(proc.stdout.readline()), {"event": "ready"})
+        page_path = Path("缓存目录") / "页面一.bmp"
+        command = {
+            "cmd": "print",
+            "printer_name": "测试打印机",
+            "job_name": "中文作业名",
+            "page_paths": [str(page_path)],
+            "page_specs": [{}],
+            "ignore_margins": True,
+            "fit_mode": "actual",
+        }
+        proc.stdin.write(json.dumps(command, ensure_ascii=False) + "\n")
+        proc.stdin.write('{"cmd": "exit"}\n')
+        proc.stdin.flush()
+
+        event = json.loads(proc.stdout.readline())
+        self.assertEqual(event["event"], "error")
+        self.assertEqual(event["message"], f"中文作业名|{page_path}")
+        proc.stdin.close()
+        self.assertEqual(proc.wait(timeout=10), 0)
+        self.assertEqual(proc.stderr.read(), "辅助进程错误流\n")
 
 
 @unittest.skipUnless(sys.platform == "win32", "print helper requires Windows printing APIs")

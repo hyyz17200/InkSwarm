@@ -312,6 +312,14 @@ class PrintHelperClient:
 
 def main(argv: list[str] | None = None) -> int:
     """Entry point of the helper subprocess (app.py --print-helper)."""
+    # The parent side of the pipe is explicitly UTF-8.  Windows otherwise
+    # gives these redirected child streams the active ANSI code page, which
+    # corrupts non-ASCII protocol fields in both directions.
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description="InkSwarm print submission helper")
     parser.add_argument("--language", default="en")
     args = parser.parse_args(argv)
