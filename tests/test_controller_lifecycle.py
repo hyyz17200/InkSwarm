@@ -42,6 +42,7 @@ class _SpoolerControl:
         self.release = threading.Event()
         self.send_started = threading.Event()
         self.copies_sent = 0
+        self.page_releases = 0
 
 
 class _FakeSpooler:
@@ -79,6 +80,9 @@ def _make_fake_print_client(control: _SpoolerControl, block: bool):
                 self._kill_pending = False
                 raise RuntimeError("print helper terminated")
             control.copies_sent += 1
+
+        def release_pages(self) -> None:
+            control.page_releases += 1
 
         def terminate(self) -> None:
             self._terminated = True
@@ -220,3 +224,11 @@ class RunLifecycleTests(TestCase):
         # A stop after the run ended must not resurrect a stale STOPPING state.
         self.controller.stop()
         self.assertEqual(self.states, [RUN_STATE_RUNNING, RUN_STATE_IDLE])
+
+    def test_multi_copy_batch_releases_helper_pages_after_last_copy(self) -> None:
+        control = _SpoolerControl()
+        self._run_with_fakes(control, block=False, run_options=RunOptions(), tasks=[_task(copies=2)])
+
+        self.assertTrue(_wait_until(lambda: RUN_STATE_IDLE in self.states))
+        self.assertEqual(control.copies_sent, 2)
+        self.assertEqual(control.page_releases, 1)

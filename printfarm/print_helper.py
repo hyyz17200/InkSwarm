@@ -22,11 +22,13 @@ from .i18n import normalize_language, translate
 # Protocol (one JSON object per line):
 #   parent -> helper : {"cmd": "print", "printer_name", "job_name", "page_paths",
 #                       "page_specs", "ignore_margins", "fit_mode", "reuse_pages"}
+#                      {"cmd": "release"}
 #                      {"cmd": "exit"}
 #   helper -> parent : {"event": "ready"}                    after startup
 #                      {"event": "fatal", "message"}         startup failed
 #                      {"event": "job_started", "job_id"}    right after StartDoc
 #                      {"event": "done"}                     copy submitted
+#                      {"event": "released"}                 prepared DIBs freed
 #                      {"event": "error", "message"}         copy failed
 #                      {"event": "debug", "message"}         debug line to relay
 #
@@ -191,6 +193,25 @@ class PrintHelperClient:
                 debug_log(f"print helper[{proc.pid}] {data.get('message', '')}")
                 continue
             return data
+
+    def release_pages(self) -> None:
+        """Best-effort release of DIBs cached for the just-finished batch."""
+        with self._lock:
+            proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            assert proc.stdin is not None
+            proc.stdin.write('{"cmd": "release"}\n')
+            proc.stdin.flush()
+            event = self._read_event(proc)
+            if event.get("event") != "released":
+                raise RuntimeError(self._t("print_helper.protocol_error", line=str(event)))
+        except Exception as exc:
+            # A dead helper has already released its process memory. Cache
+            # cleanup must never turn successfully submitted copies into a
+            # failed batch, so diagnostics are sufficient here.
+            debug_exception("PrintHelperClient.release_pages", exc)
 
     @staticmethod
     def _drain_stderr(proc: subprocess.Popen[str]) -> None:
@@ -362,6 +383,11 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if not isinstance(command, dict) or command.get("cmd") == "exit":
             break
+        if command.get("cmd") == "release":
+            prepared = None
+            prepared_key = None
+            emit({"event": "released"})
+            continue
         if command.get("cmd") != "print":
             emit({"event": "error", "message": f"unknown command: {command.get('cmd')!r}"})
             continue

@@ -36,6 +36,31 @@ from printfarm.print_helper import main
 raise SystemExit(main([]))
 """
 
+_RELEASE_HELPER_STUB = r"""
+import sys
+import types
+
+spooler_module = types.ModuleType("printfarm.spooler")
+
+class PrinterSpooler:
+    def __init__(self, language):
+        self.prepare_count = 0
+
+    def prepare_pages(self, page_paths, page_specs):
+        self.prepare_count += 1
+        return [self.prepare_count]
+
+    def print_single_copy(self, **kwargs):
+        if self.prepare_count >= 2:
+            raise RuntimeError(f"prepare-count={self.prepare_count}")
+
+spooler_module.PrinterSpooler = PrinterSpooler
+sys.modules["printfarm.spooler"] = spooler_module
+
+from printfarm.print_helper import main
+raise SystemExit(main([]))
+"""
+
 # Stand-in helper process: acknowledges startup, then on the first print
 # command reports a job id and blocks forever — the shape of a GDI submit
 # stuck inside a driver.
@@ -108,6 +133,32 @@ class PrintHelperEncodingTests(unittest.TestCase):
         proc.stdin.close()
         self.assertEqual(proc.wait(timeout=10), 0)
         self.assertEqual(proc.stderr.read(), "辅助进程错误流\n")
+
+
+class PrintHelperReleaseTests(unittest.TestCase):
+    def test_release_command_drops_predecoded_pages_before_next_batch(self) -> None:
+        with mock.patch.object(
+            print_helper_module,
+            "_print_helper_command",
+            lambda language: [sys.executable, "-c", _RELEASE_HELPER_STUB],
+        ):
+            client = PrintHelperClient(language="en")
+            self.addCleanup(client.terminate)
+            kwargs = {
+                "printer_name": "Printer P1",
+                "page_paths": [Path("page.bmp")],
+                "page_specs": [{}],
+                "ignore_margins": True,
+                "fit_mode": "actual",
+                "reuse_pages": True,
+            }
+            client.print_copy(job_name="batch one copy 1", **kwargs)
+            client.print_copy(job_name="batch one copy 2", **kwargs)
+            client.release_pages()
+
+            with self.assertRaisesRegex(RuntimeError, "prepare-count=2"):
+                client.print_copy(job_name="batch two copy 1", **kwargs)
+            client.close()
 
 
 @unittest.skipUnless(sys.platform == "win32", "print helper requires Windows printing APIs")

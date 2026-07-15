@@ -297,26 +297,31 @@ class WorkerRuntime(threading.Thread):
             page_specs = artifact.metadata.get("pages", [])
             # Each copy is a separate print job submitted through the helper
             # subprocess; for multi-copy jobs the helper keeps the decoded page
-            # DIBs across copies instead of re-decoding the cache every time.
+            # DIBs across copies instead of re-decoding the cache every time,
+            # then releases them as soon as this batch ends.
             reuse_pages = total_copies > 1
-            for copy_index in range(total_copies):
-                current_copy = copy_index + 1
-                if not self._before_copy(batch, current_copy, total_copies, active_id):
-                    break
-                self._begin_spool_send(batch.task.file_name())
-                try:
-                    self.print_client.print_copy(
-                        printer_name=batch.printer_name,
-                        job_name=f"{batch.task.file_name()} [copy {current_copy}/{total_copies}]",
-                        page_paths=artifact.page_paths,
-                        page_specs=page_specs,
-                        ignore_margins=self.run_options.ignore_margins,
-                        fit_mode=self.run_options.fit_mode,
-                        reuse_pages=reuse_pages,
-                    )
-                finally:
-                    self.spool_send_end_callback()
-                self.progress_callback(batch.task.task_id, 1)
+            try:
+                for copy_index in range(total_copies):
+                    current_copy = copy_index + 1
+                    if not self._before_copy(batch, current_copy, total_copies, active_id):
+                        break
+                    self._begin_spool_send(batch.task.file_name())
+                    try:
+                        self.print_client.print_copy(
+                            printer_name=batch.printer_name,
+                            job_name=f"{batch.task.file_name()} [copy {current_copy}/{total_copies}]",
+                            page_paths=artifact.page_paths,
+                            page_specs=page_specs,
+                            ignore_margins=self.run_options.ignore_margins,
+                            fit_mode=self.run_options.fit_mode,
+                            reuse_pages=reuse_pages,
+                        )
+                    finally:
+                        self.spool_send_end_callback()
+                    self.progress_callback(batch.task.task_id, 1)
+            finally:
+                if reuse_pages:
+                    self.print_client.release_pages()
         debug_log(f"worker batch end worker={self.worker.name} task={batch.task.file_name()} copies={batch.copies}")
         self.signals.worker_status.emit(WorkerStatusMessage(self.worker.name, "Idle"))
 
