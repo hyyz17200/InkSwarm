@@ -149,13 +149,13 @@ class SpoolerMaintenance:
         record(self._t("spooler_maintenance.current_status", status=self._format_status(before_status)))
         record(self._t("spooler_maintenance.prepare_stop"))
         stopped_status = self.stop(log=record)
-
-        record(self._t("spooler_maintenance.prepare_start"))
-        started_status = self.start(log=record)
         if stopped_status.process_id:
             raise SpoolerMaintenanceError(
                 self._t("spooler_maintenance.stop_pid_still_present", pid=stopped_status.process_id)
             )
+
+        record(self._t("spooler_maintenance.prepare_start"))
+        started_status = self.start(log=record)
         if before_status.process_id and started_status.process_id == before_status.process_id:
             raise SpoolerMaintenanceError(
                 self._t("spooler_maintenance.pid_unchanged", pid=started_status.process_id)

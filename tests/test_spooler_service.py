@@ -5,11 +5,18 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from printfarm.spooler_service import (
+    SERVICE_RUNNING,
+    SERVICE_STOPPED,
     SpoolerMaintenance,
     SpoolerMaintenanceError,
+    SpoolerServiceStatus,
     _elevated_helper_command,
     run_elevated_spooler_maintenance,
 )
+
+
+def _status(state: int, process_id: int) -> SpoolerServiceStatus:
+    return SpoolerServiceStatus(state=state, process_id=process_id, checkpoint=0, wait_hint_ms=0)
 
 
 class SpoolerMaintenanceLocalizationTests(TestCase):
@@ -31,3 +38,19 @@ class SpoolerMaintenanceLocalizationTests(TestCase):
         )
 
         self.assertIn("--language zh-Hans", parameters)
+
+
+class SpoolerRestartTests(TestCase):
+    def test_lingering_stopped_pid_is_rejected_before_service_restart(self) -> None:
+        maintenance = SpoolerMaintenance.__new__(SpoolerMaintenance)
+        maintenance.language = "en"
+        maintenance.is_process_elevated = lambda: True
+        maintenance.query_status = lambda: _status(SERVICE_RUNNING, 100)
+        maintenance.stop = lambda log=None: _status(SERVICE_STOPPED, 100)
+        start_calls: list[bool] = []
+        maintenance.start = lambda log=None: start_calls.append(True) or _status(SERVICE_RUNNING, 200)
+
+        with self.assertRaisesRegex(SpoolerMaintenanceError, "PID is still 100 after stopping"):
+            maintenance.restart()
+
+        self.assertEqual(start_calls, [])
