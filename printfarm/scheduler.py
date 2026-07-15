@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from math import floor
 from typing import Iterable
 
+from .i18n import normalize_language, translate
 from .models import TaskItem, WorkerConfig, WorkerTaskBatch
 
 
@@ -17,15 +18,16 @@ class WeightedScheduler:
     def __init__(self) -> None:
         self.state = SchedulerState()
 
-    def allocate(self, task: TaskItem, workers: Iterable[WorkerConfig]) -> list[WorkerTaskBatch]:
+    def allocate(self, task: TaskItem, workers: Iterable[WorkerConfig], language: str = "en") -> list[WorkerTaskBatch]:
+        language = normalize_language(language)
         eligible = [w for w in workers if self._worker_accepts_task(w)]
         if not eligible:
-            raise RuntimeError(f"没有可用 Worker 能处理任务 {task.file_name()}")
+            raise RuntimeError(translate(language, "scheduler.no_available_worker", file_name=task.file_name()))
 
         ordered = self._rotate_workers(eligible)
-        assignments = self._allocate_proportional_copies(task.copies, ordered)
+        assignments = self._allocate_proportional_copies(task.copies, ordered, language=language)
         if not assignments:
-            raise RuntimeError("没有可调度的 Worker")
+            raise RuntimeError(translate(language, "scheduler.no_schedulable_worker"))
 
         # 轮询顺序保持为当前轮转顺序，但每台机器只发送一批，避免重复 RIP。
         result: list[WorkerTaskBatch] = []
@@ -52,13 +54,18 @@ class WeightedScheduler:
         start = self.state.ring_index % len(eligible)
         return eligible[start:] + eligible[:start]
 
-    def _allocate_proportional_copies(self, total_copies: int, workers: list[WorkerConfig]) -> dict[str, int]:
+    def _allocate_proportional_copies(
+        self,
+        total_copies: int,
+        workers: list[WorkerConfig],
+        language: str = "en",
+    ) -> dict[str, int]:
         if total_copies <= 0 or not workers:
             return {}
 
         total_speed = sum(max(1, int(worker.weight)) for worker in workers)
         if total_speed <= 0:
-            raise RuntimeError("可用 Worker 的速度总和无效")
+            raise RuntimeError(translate(language, "scheduler.invalid_total_speed"))
 
         assignments: dict[str, int] = defaultdict(int)
         remainders: list[tuple[float, int, WorkerConfig]] = []

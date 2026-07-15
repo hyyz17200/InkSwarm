@@ -4,7 +4,7 @@ from pathlib import Path
 import json
 from typing import Any, Iterable
 
-from .models import AppPaths, PresetConfig, TaskItem, WorkerConfig
+from .models import DEFAULT_CACHE_IMAGE_FORMAT, DEFAULT_FIT_MODE, AppPaths, PresetConfig, TaskItem, WorkerConfig
 
 
 class ConfigStore:
@@ -17,11 +17,14 @@ class ConfigStore:
             statistics_dir=(root / "statistics").resolve(),
             preview_dir=(root / "cache" / "previews").resolve(),
             settings_file=(root / "app_settings.json").resolve(),
+            icc_dir=(root / "icc").resolve(),
         )
+        self.last_worker_load_errors: list[tuple[Path, str]] = []
         self.paths.cache_dir.mkdir(parents=True, exist_ok=True)
         self.paths.logs_dir.mkdir(parents=True, exist_ok=True)
         self.paths.statistics_dir.mkdir(parents=True, exist_ok=True)
         self.paths.preview_dir.mkdir(parents=True, exist_ok=True)
+        self.paths.icc_dir.mkdir(parents=True, exist_ok=True)
         self.task_session_file = (self.paths.root / "task_session.json").resolve()
 
     def default_group_dir(self) -> Path:
@@ -42,7 +45,7 @@ class ConfigStore:
             elif entry.name.startswith("Workers"):
                 names.append(entry.name)
         if not names:
-                names = [self.default_group_dir().name]
+            names = [self.default_group_dir().name]
         return names
 
     def _worker_config_exists_anywhere(self) -> bool:
@@ -83,13 +86,11 @@ class ConfigStore:
                     {
                         "name": "default",
                         "dpi": 300,
-                        "fit_mode": "actual",
                         "rendering_intent": "relative_colorimetric",
-                        "input_icc": "",
                         "output_icc": "",
                         "printui_restore_file": "",
                         "black_point_compensation": False,
-                        "notes": "示例预设",
+                        "notes": "default preset",
                     },
                     indent=2,
                     ensure_ascii=False,
@@ -102,12 +103,17 @@ class ConfigStore:
         presets_dir.mkdir(parents=True, exist_ok=True)
         presets: dict[str, PresetConfig] = {}
         for preset_file in sorted(presets_dir.glob("*.json")):
-            preset_raw = json.loads(preset_file.read_text(encoding="utf-8"))
-            preset = PresetConfig.from_dict(preset_raw, file_path=preset_file)
+            try:
+                preset_raw = json.loads(preset_file.read_text(encoding="utf-8"))
+                preset = PresetConfig.from_dict(preset_raw, file_path=preset_file)
+            except Exception as exc:
+                self.last_worker_load_errors.append((preset_file, str(exc)))
+                continue
             presets[preset.name] = preset
         return presets
 
     def load_workers(self, group_name: str | None = None) -> list[WorkerConfig]:
+        self.last_worker_load_errors = []
         group_dir = self.worker_group_dir(group_name)
         group_dir.mkdir(parents=True, exist_ok=True)
         workers: list[WorkerConfig] = []
@@ -116,9 +122,14 @@ class ConfigStore:
             worker_file = directory / "worker.json"
             if not worker_file.exists():
                 continue
-            raw = json.loads(worker_file.read_text(encoding="utf-8"))
-            presets = self._load_presets_for_worker(directory)
-            workers.append(WorkerConfig.from_dict(raw, directory=directory, presets=presets))
+            try:
+                raw = json.loads(worker_file.read_text(encoding="utf-8"))
+                presets = self._load_presets_for_worker(directory)
+                worker = WorkerConfig.from_dict(raw, directory=directory, presets=presets)
+            except Exception as exc:
+                self.last_worker_load_errors.append((worker_file, str(exc)))
+                continue
+            workers.append(worker)
 
         if not workers and not self._worker_config_exists_anywhere():
             self.ensure_sample_worker(group_dir)
@@ -129,18 +140,14 @@ class ConfigStore:
         worker.directory.mkdir(parents=True, exist_ok=True)
         worker.preset_dir.mkdir(parents=True, exist_ok=True)
         worker.worker_file.write_text(json.dumps(worker.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
-        existing_files = {p.resolve() for p in worker.preset_dir.glob("*.json")}
-        written_files: set[Path] = set()
+        # Presets are authored directly on disk (the GUI has no preset editor),
+        # so only rewrite the presets this process loaded and never delete other
+        # .json files: a preset file added while the app is running must survive
+        # a save/close that happens before the next worker reload.
         for preset in worker.presets.values():
             target = preset.file_path or (worker.preset_dir / f"{preset.name}.json")
             preset.file_path = target
             target.write_text(json.dumps(preset.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
-            written_files.add(target.resolve())
-        for old_file in existing_files - written_files:
-            try:
-                old_file.unlink(missing_ok=True)
-            except Exception:
-                pass
 
     def save_workers(self, workers: Iterable[WorkerConfig]) -> None:
         for worker in workers:
@@ -157,14 +164,20 @@ class ConfigStore:
             "auto_orient_enabled": False,
             "target_orientation": "portrait",
             "ignore_margins": True,
+            "fit_mode": DEFAULT_FIT_MODE,
             "worker_queue_limit_enabled": False,
             "worker_queue_limit": 3,
+            "queue_poll_seconds": 5,
             "tail_balance_enabled": False,
             "tail_balance_idle_seconds": 15,
+            "stop_force_wait_seconds": 15,
             "rip_limit_enabled": True,
             "rip_limit_ppi": 300,
             "printer_defaults_check_enabled": True,
+            "cmyk_fallback_icc": "",
+            "cache_image_format": DEFAULT_CACHE_IMAGE_FORMAT,
             "font_engine": "auto",
+            "language": "en",
             "task_default_copies": 1,
             "window_width": 1450,
             "vertical_pane_heights": None,

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .config_store import ConfigStore
+from .i18n import DEFAULT_LANGUAGE, normalize_language, translate
 from .models import SUPPORTED_INPUT_SUFFIXES, TaskItem, TaskStatusMessage
 from .task_inspector import TaskInspectionError, build_preview_file, inspect_task_input
 
@@ -13,6 +14,7 @@ from .task_inspector import TaskInspectionError, build_preview_file, inspect_tas
 class SkippedTaskInput:
     file_path: Path
     reason: str
+    reason_key: str | None = None
 
 
 @dataclass
@@ -31,23 +33,49 @@ class TaskService:
     def __init__(self, store: ConfigStore) -> None:
         self.store = store
 
-    def add_files(self, tasks: list[TaskItem], files: Iterable[Path], default_copies: int = 1) -> AddTasksResult:
+    def add_files(
+        self,
+        tasks: list[TaskItem],
+        files: Iterable[Path],
+        default_copies: int = 1,
+        language: str = "en",
+        cmyk_fallback_icc: Path | None = None,
+    ) -> AddTasksResult:
+        language = normalize_language(language)
         result = AddTasksResult()
         existing_paths = {task.file_path.resolve() for task in tasks}
         copies = max(1, int(default_copies))
         for path in files:
             if not path.exists():
-                result.skipped.append(SkippedTaskInput(path, "文件不存在"))
+                result.skipped.append(
+                    SkippedTaskInput(
+                        path,
+                        translate(DEFAULT_LANGUAGE, "task.skip.missing_file"),
+                        "task.skip.missing_file",
+                    )
+                )
                 continue
             if path.suffix.lower() not in SUPPORTED_INPUT_SUFFIXES:
-                result.skipped.append(SkippedTaskInput(path, "不支持的文件类型"))
+                result.skipped.append(
+                    SkippedTaskInput(
+                        path,
+                        translate(DEFAULT_LANGUAGE, "task.skip.unsupported"),
+                        "task.skip.unsupported",
+                    )
+                )
                 continue
             resolved = path.resolve()
             if resolved in existing_paths:
-                result.skipped.append(SkippedTaskInput(resolved, "已在任务列表中"))
+                result.skipped.append(
+                    SkippedTaskInput(
+                        resolved,
+                        translate(DEFAULT_LANGUAGE, "task.skip.duplicate"),
+                        "task.skip.duplicate",
+                    )
+                )
                 continue
             try:
-                inspection = inspect_task_input(resolved)
+                inspection = inspect_task_input(resolved, language=language, cmyk_fallback_icc=cmyk_fallback_icc)
             except TaskInspectionError as exc:
                 result.skipped.append(SkippedTaskInput(resolved, str(exc)))
                 continue
@@ -60,7 +88,12 @@ class TaskService:
             result.added_count += 1
         return result
 
-    def restore_saved_tasks(self, tasks: list[TaskItem]) -> RestoreTasksResult:
+    def restore_saved_tasks(
+        self,
+        tasks: list[TaskItem],
+        language: str = "en",
+        cmyk_fallback_icc: Path | None = None,
+    ) -> RestoreTasksResult:
         session_items = self.store.load_task_session()
         if not session_items:
             return RestoreTasksResult()
@@ -78,7 +111,7 @@ class TaskService:
             copies_map[resolved] = max(1, int(item.get("copies", 1)))
             enabled_map[resolved] = bool(item.get("enabled", True))
 
-        add_result = self.add_files(tasks, files_to_add)
+        add_result = self.add_files(tasks, files_to_add, language=language, cmyk_fallback_icc=cmyk_fallback_icc)
         for task in tasks:
             resolved = task.file_path.resolve()
             task.copies = copies_map.get(resolved, task.copies)

@@ -9,7 +9,7 @@ import threading
 
 
 from PySide6.QtCore import Qt, QUrl, QTimer, Signal
-from PySide6.QtGui import QAction, QDesktopServices, QFont, QIcon, QPalette, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QFont, QFontMetrics, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -39,31 +40,65 @@ from PySide6.QtWidgets import (
     QTabBar,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from .config_store import ConfigStore
-from .controller import PrintController
+from .controller import (
+    RUN_STATE_IDLE,
+    RUN_STATE_RUNNING,
+    RUN_STATE_STOPPING,
+    PrintController,
+)
 from .cache_service import CacheService
+from .i18n import language_options, normalize_language, translate
 from .local_logger import LocalLogWriter, RegularLogFilter
-from .models import SUPPORTED_INPUT_SUFFIXES, TaskItem, TaskStatusMessage, WorkerConfig, WorkerStatusMessage
+from .models import (
+    CACHE_FORMAT_PNG_L1,
+    CACHE_FORMAT_TIFF_DEFLATE,
+    CACHE_FORMAT_TIFF_NONE,
+    CACHE_IMAGE_FORMATS,
+    FIT_MODES,
+    SUPPORTED_INPUT_SUFFIXES,
+    TaskItem,
+    TaskStatusMessage,
+    WorkerConfig,
+    WorkerStatusMessage,
+    normalize_cache_image_format,
+    normalize_fit_mode,
+    resolve_icc_path,
+)
+from .maintenance_flow import (
+    STAGE_DRAINING,
+    STAGE_RESTARTING,
+    STAGE_WAITING_SENDS,
+    MaintenanceControl,
+    MaintenanceOutcome,
+    MaintenanceStatus,
+    SpoolerMaintenanceFlow,
+)
 from .run_service import RunService
-from .spooler_service import SpoolerMaintenance, SpoolerMaintenanceCancelled, run_elevated_spooler_maintenance
+from .spooler import PrinterQueueSnapshot, list_printers_with_jobs
+from .spooler_service import SpoolerMaintenance, run_elevated_spooler_maintenance
 from .statistics_writer import CSV_HEADER, MonthlyStatisticsWriter
-from .task_service import TaskService
+from .task_service import SkippedTaskInput, TaskService
 from .worker_service import WorkerService, WorkerValidationError
 from .debug_logger import debug_exception, debug_log, initialize_debug_logging, install_qt_message_handler
 
 
 APP_NAME = "InkSwarm"
-APP_VERSION = "0.2.9"
+APP_VERSION = "0.3.16"
 DEBUG_LOG_NAME = "debug.log"
 DEFAULT_WINDOW_WIDTH = 1450
 DEFAULT_WINDOW_HEIGHT = 940
 # Edit these three values to tune the vertical pane heights: task, worker, log.
 DEFAULT_VERTICAL_PANE_HEIGHTS = (320, 420, 320)
-STATISTICS_HIDDEN_COLUMNS = {"运行ID"}
+# Max log lines kept in the on-screen view (~7.5 KB/line); ~40 MB ceiling at 5000.
+# Full history is still persisted to logs/ via LocalLogWriter, so nothing is lost.
+LOG_VIEW_MAX_BLOCKS = 5000
+STATISTICS_HIDDEN_COLUMNS = {"Run ID"}
 
 
 def get_app_root() -> Path:
@@ -129,8 +164,170 @@ class CenteredComboBox(QComboBox):
         )
 
 
+class SpoolerMaintenanceDialog(QDialog):
+    """Progress view for the staged print-queue restart.
+
+    Pure view: it renders MaintenanceStatus ticks coming from the flow thread
+    (forwarded by MainWindow on the GUI thread) and its buttons only set
+    MaintenanceControl events for the flow to consume. All waits are decided
+    by the user here; only the service-restart stage cannot be cancelled.
+    """
+
+    def __init__(self, parent, translator, control: MaintenanceControl) -> None:
+        super().__init__(parent)
+        self._t = translator
+        self._control = control
+        self._finished = False
+        self.setWindowTitle(self._t("spool.maintenance_dialog_title"))
+        self.setModal(True)
+        self.resize(560, 420)
+
+        layout = QVBoxLayout(self)
+        self.stage_label = QLabel(self._t("spool.maintenance_dialog_title"))
+        stage_font = self.stage_label.font()
+        stage_font.setBold(True)
+        self.stage_label.setFont(stage_font)
+        self.stage_label.setWordWrap(True)
+        layout.addWidget(self.stage_label)
+
+        self.elapsed_label = QLabel("")
+        layout.addWidget(self.elapsed_label)
+
+        self.detail_label = QLabel("")
+        self.detail_label.setWordWrap(True)
+        layout.addWidget(self.detail_label)
+
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(500)
+        layout.addWidget(self.log_view, 1)
+
+        buttons = QHBoxLayout()
+        self.force_kill_button = QPushButton(self._t("spool.force_kill_button"))
+        self.force_kill_button.clicked.connect(self._on_force_kill_clicked)
+        self.force_kill_button.setVisible(False)
+        buttons.addWidget(self.force_kill_button)
+
+        self.skip_drain_button = QPushButton(self._t("spool.skip_drain_button"))
+        self.skip_drain_button.clicked.connect(self._on_skip_drain_clicked)
+        self.skip_drain_button.setVisible(False)
+        buttons.addWidget(self.skip_drain_button)
+
+        buttons.addStretch(1)
+
+        self.cancel_button = QPushButton(self._t("actions.cancel"))
+        self.cancel_button.clicked.connect(self._on_cancel_clicked)
+        buttons.addWidget(self.cancel_button)
+
+        self.close_button = QPushButton(self._t("actions.close"))
+        self.close_button.clicked.connect(self.close)
+        self.close_button.setVisible(False)
+        buttons.addWidget(self.close_button)
+        layout.addLayout(buttons)
+
+    def update_status(self, status: MaintenanceStatus) -> None:
+        if self._finished:
+            return
+        self.stage_label.setText(self._t(f"spool.stage.{status.stage}"))
+        waiting = status.stage == STAGE_WAITING_SENDS
+        draining = status.stage == STAGE_DRAINING
+        restarting = status.stage == STAGE_RESTARTING
+        self.force_kill_button.setVisible(waiting)
+        self.skip_drain_button.setVisible(draining)
+        self.cancel_button.setEnabled(not restarting and not self._control.cancel.is_set())
+        if restarting:
+            # The service restart is not a user decision point: no wait timer.
+            self.elapsed_label.setText("")
+            self.detail_label.setText("")
+            return
+        self.elapsed_label.setText(self._t("spool.stage_elapsed", seconds=int(status.elapsed_seconds)))
+        if waiting:
+            self.detail_label.setText(self._t("spool.pending_sends", count=status.pending_sends))
+        else:
+            self.detail_label.setText("\n".join(self._printer_line(snapshot) for snapshot in status.printers))
+
+    def _printer_line(self, snapshot: PrinterQueueSnapshot) -> str:
+        flags: list[str] = []
+        if snapshot.unreachable:
+            flags.append(self._t("spool.printer_flag.unreachable", error=snapshot.unreachable))
+        else:
+            if snapshot.offline:
+                flags.append(self._t("spool.printer_flag.offline"))
+            if snapshot.paused:
+                flags.append(self._t("spool.printer_flag.paused"))
+            if snapshot.error:
+                flags.append(self._t("spool.printer_flag.error"))
+        flag_text = f" — {', '.join(flags)}" if flags else ""
+        return self._t(
+            "spool.drain_queue_line",
+            printer=snapshot.printer_name,
+            count=snapshot.job_count,
+            flags=flag_text,
+        )
+
+    def append_log(self, message: str) -> None:
+        self.log_view.appendPlainText(message)
+
+    def mark_finished(self, ok: bool, message: str) -> None:
+        self._finished = True
+        self.stage_label.setText(
+            self._t("spool.restart_complete_title") if ok else self._t("spool.maintenance_failed")
+        )
+        self.elapsed_label.setText("")
+        self.detail_label.setText(message)
+        self.force_kill_button.setVisible(False)
+        self.skip_drain_button.setVisible(False)
+        self.cancel_button.setVisible(False)
+        self.close_button.setVisible(True)
+        self.close_button.setDefault(True)
+
+    def close_silently(self) -> None:
+        self._finished = True
+        self.close()
+
+    def _on_force_kill_clicked(self) -> None:
+        confirm = QMessageBox.question(
+            self,
+            self._t("spool.force_kill_confirm_title"),
+            self._t("spool.force_kill_confirm_text"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            self._control.force_kill.set()
+
+    def _on_skip_drain_clicked(self) -> None:
+        self.skip_drain_button.setEnabled(False)
+        self._control.skip_drain.set()
+
+    def _on_cancel_clicked(self) -> None:
+        self._control.cancel.set()
+        self.cancel_button.setEnabled(False)
+        self.force_kill_button.setEnabled(False)
+        self.skip_drain_button.setEnabled(False)
+
+    def closeEvent(self, event) -> None:
+        if self._finished:
+            super().closeEvent(event)
+            return
+        # Closing the window acts like Cancel while cancelling is still
+        # possible; the dialog stays up until the flow thread acknowledges.
+        if self.cancel_button.isEnabled():
+            self._on_cancel_clicked()
+        event.ignore()
+
+    def reject(self) -> None:
+        # Esc follows the same rules as the window close button.
+        if self._finished:
+            super().reject()
+            return
+        if self.cancel_button.isEnabled():
+            self._on_cancel_clicked()
+
+
 class MainWindow(QMainWindow):
     spooler_maintenance_log = Signal(str)
+    spooler_maintenance_status = Signal(object)
     spooler_maintenance_finished = Signal(object)
 
     def __init__(self) -> None:
@@ -152,7 +349,8 @@ class MainWindow(QMainWindow):
         self.controller.signals.run_state.connect(self.on_run_state_changed)
         self.controller.signals.pause_state.connect(self.on_pause_state_changed)
         self.controller.signals.spool_progress.connect(self.on_spool_progress)
-        self.spooler_maintenance_log.connect(self.on_log_text)
+        self.spooler_maintenance_log.connect(self.on_spooler_maintenance_log)
+        self.spooler_maintenance_status.connect(self.on_spooler_maintenance_status)
         self.spooler_maintenance_finished.connect(self.on_spooler_maintenance_finished)
         self.log_writer = LocalLogWriter(self.store.paths.logs_dir)
         self.regular_log_filter = RegularLogFilter()
@@ -161,6 +359,7 @@ class MainWindow(QMainWindow):
         self.debug_log_path = (self.store.paths.logs_dir / DEBUG_LOG_NAME).resolve()
         debug_log(f"mainwindow init root_dir={self.root_dir}")
         self.app_settings = self.store.load_app_settings()
+        self.app_settings["language"] = self.current_language()
         debug_log(f"settings loaded {self.app_settings}")
         self.set_console_visibility(False)
         self.current_worker_group = self.app_settings.get("active_worker_group", self.store.default_group_dir().name)
@@ -173,7 +372,19 @@ class MainWindow(QMainWindow):
         self.current_preview_pixmap: QPixmap | None = None
         self._spool_total = 0
         self._spooler_maintenance_active = False
+        self._spooler_maintenance_dialog: SpoolerMaintenanceDialog | None = None
         self.worker_config_error: str | None = None
+        # Mirror of the last run_state signal; the single source of truth for
+        # run-dependent widget state (never mix with live is_running() checks,
+        # which can disagree while a stuck worker is still draining).
+        self._run_state: str = RUN_STATE_IDLE
+        # Gentle-wait countdown while STOPPING; when it reaches zero the Stop
+        # button re-arms as "Force Stop" (user-triggered, never automatic).
+        self._force_stop_armed = False
+        self._stopping_seconds_left = 0
+        self._stopping_countdown_timer = QTimer(self)
+        self._stopping_countdown_timer.setInterval(1000)
+        self._stopping_countdown_timer.timeout.connect(self._on_stopping_countdown_tick)
 
         self._saved_ui_scale = int(self.app_settings.get("ui_scale", 100))
         self._ui_scale_applied_once = False
@@ -187,15 +398,23 @@ class MainWindow(QMainWindow):
         if self.app_settings.get("save_tasks_on_exit", False):
             self.restore_task_session()
         if self.app_settings.get("auto_clear_cache_on_start", False):
-            self.on_log_text("已自动清理上次缓存。")
+            self.on_log_text(self.t("log.auto_cache_cleared"))
         QTimer.singleShot(0, self.apply_saved_startup_ui_state)
 
-    def _add_section_header(self, layout: QVBoxLayout, title: str) -> None:
-        layout.addWidget(QLabel(title))
+    def current_language(self) -> str:
+        return normalize_language(self.app_settings.get("language", "en"))
+
+    def t(self, key: str, **kwargs: object) -> str:
+        return translate(self.current_language(), key, **kwargs)
+
+    def _add_section_header(self, layout: QVBoxLayout, title: str) -> QLabel:
+        label = QLabel(title)
+        layout.addWidget(label)
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(line)
+        return label
 
     def _build_ui(self) -> None:
         self._build_menu_bar()
@@ -212,13 +431,13 @@ class MainWindow(QMainWindow):
         top_layout = QVBoxLayout(top)
         top_layout.setContentsMargins(8, 8, 8, 8)
         top_layout.setSpacing(6)
-        self._add_section_header(top_layout, "任务列表（支持拖放 PDF / 图片）")
+        self.task_section_label = self._add_section_header(top_layout, self.t("title.task_section"))
 
         self.top_splitter = QSplitter(Qt.Orientation.Horizontal)
 
         self.task_table = FileDropTable(self.add_files)
         self.task_table.setColumnCount(5)
-        self.task_table.setHorizontalHeaderLabels(["启用", "文件", "份数", "打印尺寸", "状态"])
+        self.task_table.setHorizontalHeaderLabels(self._task_table_headers())
         self.task_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.task_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.task_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -256,13 +475,13 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(self.top_splitter, 1)
 
         task_buttons = QHBoxLayout()
-        self.btn_add_tasks = QPushButton("添加文件")
+        self.btn_add_tasks = QPushButton(self.t("actions.add_files"))
         self.btn_add_tasks.clicked.connect(self.pick_files)
-        self.btn_remove_tasks = QPushButton("移除选中")
+        self.btn_remove_tasks = QPushButton(self.t("actions.remove_selected"))
         self.btn_remove_tasks.clicked.connect(self.remove_selected_tasks)
-        self.btn_clear_tasks = QPushButton("清空任务")
+        self.btn_clear_tasks = QPushButton(self.t("actions.clear_tasks"))
         self.btn_clear_tasks.clicked.connect(self.clear_tasks)
-        self.btn_set_task_copies = QPushButton("批量设置份数")
+        self.btn_set_task_copies = QPushButton(self.t("actions.batch_copies"))
         self.btn_set_task_copies.clicked.connect(self.set_selected_task_copies)
         self.task_copies_value_box = QSpinBox()
         self.task_copies_value_box.setRange(1, 9999)
@@ -283,7 +502,7 @@ class MainWindow(QMainWindow):
         worker_layout = QVBoxLayout(worker_panel)
         worker_layout.setContentsMargins(8, 8, 8, 8)
         worker_layout.setSpacing(6)
-        self._add_section_header(worker_layout, "Worker 列表")
+        self.worker_section_label = self._add_section_header(worker_layout, self.t("title.worker_section"))
 
         worker_content = QHBoxLayout()
         worker_content.setSpacing(8)
@@ -295,7 +514,7 @@ class MainWindow(QMainWindow):
 
         self.worker_table = QTableWidget()
         self.worker_table.setColumnCount(6)
-        self.worker_table.setHorizontalHeaderLabels(["启用", "Worker", "打印机", "预设", "速度", "状态"])
+        self.worker_table.setHorizontalHeaderLabels(self._worker_table_headers())
         self.worker_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.worker_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.worker_table.setAlternatingRowColors(True)
@@ -315,46 +534,48 @@ class MainWindow(QMainWindow):
         worker_left_layout.addWidget(self.worker_table, 1)
 
         worker_buttons = QHBoxLayout()
-        worker_buttons.addWidget(QLabel("方案组"))
+        self.worker_group_label = QLabel(self.t("worker_group"))
+        worker_buttons.addWidget(self.worker_group_label)
         self.worker_group_combo = QComboBox()
         self.worker_group_combo.setMinimumWidth(150)
         self.worker_group_combo.currentIndexChanged.connect(self.on_worker_group_changed)
         worker_buttons.addWidget(self.worker_group_combo)
 
-        btn_reload_workers = QPushButton("重载Worker")
-        btn_reload_workers.clicked.connect(self.reload_workers)
-        btn_save_workers = QPushButton("保存Worker设定")
-        btn_save_workers.clicked.connect(self.save_worker_settings)
-        btn_open_pref = QPushButton("打开驱动首选项")
-        btn_open_pref.clicked.connect(self.open_selected_worker_preferences)
-        btn_open_props = QPushButton("打开打印机属性")
-        btn_open_props.clicked.connect(self.open_selected_worker_properties)
-        btn_capture = QPushButton("保存驱动设定")
-        btn_capture.clicked.connect(self.capture_selected_worker_snapshot)
-        for btn in [btn_reload_workers, btn_save_workers, btn_open_pref, btn_open_props, btn_capture]:
+        self.btn_reload_workers = QPushButton(self.t("actions.reload_workers"))
+        self.btn_reload_workers.clicked.connect(self.reload_workers)
+        self.btn_save_workers = QPushButton(self.t("actions.save_worker_settings"))
+        self.btn_save_workers.clicked.connect(self.save_worker_settings)
+        self.btn_open_pref = QPushButton(self.t("actions.open_driver_preferences"))
+        self.btn_open_pref.clicked.connect(self.open_selected_worker_preferences)
+        self.btn_open_props = QPushButton(self.t("actions.open_printer_properties"))
+        self.btn_open_props.clicked.connect(self.open_selected_worker_properties)
+        self.btn_capture = QPushButton(self.t("actions.save_driver_settings"))
+        self.btn_capture.clicked.connect(self.capture_selected_worker_snapshot)
+        for btn in [self.btn_reload_workers, self.btn_save_workers, self.btn_open_pref, self.btn_open_props, self.btn_capture]:
             worker_buttons.addWidget(btn)
         worker_buttons.addStretch(1)
         worker_left_layout.addLayout(worker_buttons)
 
         controls_panel = QFrame()
+        self.worker_controls_panel = controls_panel
         controls_panel.setObjectName("workerControlPanel")
-        controls_panel.setMinimumWidth(180)
+        controls_panel.setMinimumWidth(150)
         controls_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         controls_layout = QVBoxLayout(controls_panel)
         controls_layout.setContentsMargins(10, 10, 10, 10)
         controls_layout.setSpacing(10)
 
-        self.start_button = QPushButton("开始发送")
+        self.start_button = QPushButton(self.t("actions.start"))
         self.start_button.clicked.connect(self.start_or_toggle_pause)
         self.start_button.setObjectName("primaryActionButton")
-        self.start_button.setMinimumHeight(96)
+        self.start_button.setMinimumHeight(72)
         self.start_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        self.stop_button = QPushButton("停止")
+        self.stop_button = QPushButton(self.t("actions.stop"))
         self.stop_button.clicked.connect(self.stop_run)
         self.stop_button.setObjectName("dangerActionButton")
         self.stop_button.setEnabled(False)
-        self.stop_button.setMinimumHeight(96)
+        self.stop_button.setMinimumHeight(72)
         self.stop_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         controls_layout.addWidget(self.start_button)
@@ -364,7 +585,7 @@ class MainWindow(QMainWindow):
         self.spool_progress_bar.setRange(0, 1)
         self.spool_progress_bar.setValue(0)
         self.spool_progress_bar.setTextVisible(False)
-        self.spool_progress_label = QLabel("已发送: 0 / 0")
+        self.spool_progress_label = QLabel(self.t("spool.progress", sent=0, total=0))
         self.spool_progress_label.setObjectName("spoolProgressLabel")
         self.spool_progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.spool_progress_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -384,10 +605,10 @@ class MainWindow(QMainWindow):
         log_header = QHBoxLayout()
         self.log_card_tabs = QTabBar()
         self.log_card_tabs.setDrawBase(False)
-        self.log_card_tabs.addTab("日志")
-        self.log_card_tabs.addTab("今日统计")
-        self.log_card_tabs.addTab("本月统计")
-        self.log_card_tabs.addTab("上月统计")
+        self.log_card_tabs.addTab(self.t("tab.log"))
+        self.log_card_tabs.addTab(self.t("tab.today"))
+        self.log_card_tabs.addTab(self.t("tab.current_month"))
+        self.log_card_tabs.addTab(self.t("tab.previous_month"))
         self.log_card_tabs.currentChanged.connect(self.on_log_card_changed)
         log_header.addWidget(self.log_card_tabs)
         log_header.addStretch(1)
@@ -406,6 +627,10 @@ class MainWindow(QMainWindow):
         log_page_layout.setSpacing(0)
         self.log_edit = QPlainTextEdit()
         self.log_edit.setReadOnly(True)
+        # Cap the on-screen scrollback (~7.5 KB/line in QPlainTextEdit) so a long
+        # production session can't grow unbounded; full history stays in logs/.
+        self.log_edit.setMaximumBlockCount(LOG_VIEW_MAX_BLOCKS)
+        self.log_edit.setUndoRedoEnabled(False)
         log_page_layout.addWidget(self.log_edit, 1)
         self.log_stack.addWidget(log_page)
 
@@ -449,50 +674,93 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.main_splitter)
         self.setCentralWidget(central)
+        self.apply_language(refresh_statistics=False)
 
     def _build_menu_bar(self) -> None:
         menu = self.menuBar()
-        settings_action = QAction("设置", self)
-        settings_action.triggered.connect(self.open_settings_dialog)
-        menu.addAction(settings_action)
+        self.settings_action = QAction(self.t("menu.settings"), self)
+        self.settings_action.triggered.connect(self.open_settings_dialog)
+        menu.addAction(self.settings_action)
 
-        open_root_action = QAction("程序目录", self)
-        open_root_action.triggered.connect(self.open_program_dir)
-        menu.addAction(open_root_action)
+        self.open_root_action = QAction(self.t("menu.program_dir"), self)
+        self.open_root_action.triggered.connect(self.open_program_dir)
+        menu.addAction(self.open_root_action)
 
-        print_mgmt_action = QAction("打印管理器", self)
-        print_mgmt_action.triggered.connect(self.open_print_management)
-        menu.addAction(print_mgmt_action)
+        self.print_mgmt_action = QAction(self.t("menu.print_management"), self)
+        self.print_mgmt_action.triggered.connect(self.open_print_management)
+        menu.addAction(self.print_mgmt_action)
 
-        self.restart_spooler_action = QAction("重启队列", self)
+        self.restart_spooler_action = QAction(self.t("menu.restart_queue"), self)
         self.restart_spooler_action.triggered.connect(self.restart_print_queue)
         menu.addAction(self.restart_spooler_action)
 
-        help_action = QAction("关于", self)
-        help_action.triggered.connect(self.open_help_dialog)
-        menu.addAction(help_action)
+        self.help_action = QAction(self.t("menu.about"), self)
+        self.help_action.triggered.connect(self.open_help_dialog)
+        menu.addAction(self.help_action)
+
+        self._build_language_menu(menu)
+
+    def _build_language_menu(self, menu) -> None:
+        # Language switcher pinned to the far right of the menu bar. Its label
+        # stays "Language" in every locale; the dropdown lists each language by
+        # its native name and marks the active one with a check.
+        self.language_menu = QMenu(self)
+        self.language_action_group = QActionGroup(self)
+        self.language_action_group.setExclusive(True)
+        self.language_actions: dict[str, QAction] = {}
+        for code, label in language_options():
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setData(code)
+            action.triggered.connect(lambda _checked=False, c=code: self.on_language_selected(c))
+            self.language_action_group.addAction(action)
+            self.language_menu.addAction(action)
+            self.language_actions[code] = action
+
+        self.language_button = QToolButton(self)
+        self.language_button.setObjectName("languageMenuButton")
+        self.language_button.setText("Language")
+        self.language_button.setMenu(self.language_menu)
+        self.language_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.language_button.setAutoRaise(True)
+        menu.setCornerWidget(self.language_button, Qt.Corner.TopRightCorner)
+        self._update_language_menu_checks()
+
+    def _update_language_menu_checks(self) -> None:
+        current = self.current_language()
+        for code, action in self.language_actions.items():
+            action.setChecked(code == current)
+
+    def on_language_selected(self, code: str) -> None:
+        new_language = normalize_language(code)
+        if new_language == self.current_language():
+            self._update_language_menu_checks()
+            return
+        self.app_settings["language"] = new_language
+        self.store.save_app_settings(self.app_settings)
+        self.apply_language(refresh_statistics=True)
 
     def open_settings_dialog(self) -> None:
         dialog = QDialog(self)
-        dialog.setWindowTitle("设置")
+        dialog.setWindowTitle(self.t("settings.title"))
         dialog.setModal(True)
-        dialog.resize(520, 500)
+        dialog.resize(540, 580)
 
         layout = QVBoxLayout(dialog)
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        autoclear_checkbox = QCheckBox("启动时自动清理上次缓存")
+        autoclear_checkbox = QCheckBox(self.t("settings.auto_clear_cache"))
         autoclear_checkbox.setChecked(bool(self.app_settings.get("auto_clear_cache_on_start", False)))
-        form.addRow("缓存", autoclear_checkbox)
+        form.addRow(self.t("settings.cache"), autoclear_checkbox)
 
-        save_tasks_checkbox = QCheckBox("退出时保存任务列表")
+        save_tasks_checkbox = QCheckBox(self.t("settings.save_tasks"))
         save_tasks_checkbox.setChecked(bool(self.app_settings.get("save_tasks_on_exit", False)))
-        form.addRow("任务", save_tasks_checkbox)
+        form.addRow(self.t("settings.task"), save_tasks_checkbox)
 
         font_edit = QLineEdit(str(self.app_settings.get("font_family", "Segoe UI") or "Segoe UI"))
         font_edit.setClearButtonEnabled(True)
-        form.addRow("字体", font_edit)
+        form.addRow(self.t("settings.font"), font_edit)
 
         scale_combo = QComboBox()
         for value in [100, 125, 150, 175, 200]:
@@ -501,66 +769,135 @@ class MainWindow(QMainWindow):
         idx = scale_combo.findData(current_scale)
         if idx >= 0:
             scale_combo.setCurrentIndex(idx)
-        form.addRow("界面缩放", scale_combo)
+        form.addRow(self.t("settings.ui_scale"), scale_combo)
 
         font_engine_combo = QComboBox()
-        font_engine_combo.addItem("Auto", "auto")
-        font_engine_combo.addItem("GDI（关闭 DirectWrite）", "gdi")
-        font_engine_combo.addItem("FreeType", "freetype")
+        font_engine_combo.addItem(self.t("settings.font_engine.auto"), "auto")
+        font_engine_combo.addItem(self.t("settings.font_engine.gdi"), "gdi")
+        font_engine_combo.addItem(self.t("settings.font_engine.freetype"), "freetype")
         current_engine = str(self.app_settings.get("font_engine", "auto") or "auto").lower()
         engine_idx = font_engine_combo.findData(current_engine)
         if engine_idx >= 0:
             font_engine_combo.setCurrentIndex(engine_idx)
-        form.addRow("字体引擎（重启生效）", font_engine_combo)
+        form.addRow(self.t("settings.font_engine"), font_engine_combo)
 
-        ignore_margins_checkbox = QCheckBox("打印时尽量满版，不为页边距让位")
+        ignore_margins_checkbox = QCheckBox(self.t("settings.ignore_margins_text"))
         ignore_margins_checkbox.setChecked(bool(self.app_settings.get("ignore_margins", True)))
-        form.addRow("忽略页边距", ignore_margins_checkbox)
+        form.addRow(self.t("settings.ignore_margins"), ignore_margins_checkbox)
 
-        printer_defaults_checkbox = QCheckBox("启用")
+        # Page sizing (fit) mode. A short description of the selected mode is shown
+        # below the combo and updated live so the user understands what each option
+        # actually does before applying it.
+        fit_mode_combo = QComboBox()
+        for mode in FIT_MODES:
+            fit_mode_combo.addItem(self.t(f"settings.fit_mode.{mode}"), mode)
+        fit_mode_idx = fit_mode_combo.findData(normalize_fit_mode(self.app_settings.get("fit_mode")))
+        if fit_mode_idx >= 0:
+            fit_mode_combo.setCurrentIndex(fit_mode_idx)
+        fit_mode_desc = QLabel()
+        fit_mode_desc.setWordWrap(True)
+        fit_mode_desc.setObjectName("settingsHintLabel")
+
+        def _update_fit_mode_desc(_index: int = 0) -> None:
+            mode = normalize_fit_mode(fit_mode_combo.currentData())
+            fit_mode_desc.setText(self.t(f"settings.fit_mode.{mode}_desc"))
+
+        fit_mode_combo.currentIndexChanged.connect(_update_fit_mode_desc)
+        _update_fit_mode_desc()
+        form.addRow(self.t("settings.fit_mode"), fit_mode_combo)
+        form.addRow("", fit_mode_desc)
+
+        printer_defaults_checkbox = QCheckBox(self.t("status.enabled"))
         printer_defaults_checkbox.setChecked(bool(self.app_settings.get("printer_defaults_check_enabled", True)))
-        form.addRow("初始化打印默认值检查", printer_defaults_checkbox)
+        form.addRow(self.t("settings.printer_defaults_check"), printer_defaults_checkbox)
 
-        orient_enabled_checkbox = QCheckBox("启用")
+        cmyk_fallback_row = QWidget()
+        cmyk_fallback_layout = QHBoxLayout(cmyk_fallback_row)
+        cmyk_fallback_layout.setContentsMargins(0, 0, 0, 0)
+        cmyk_fallback_layout.setSpacing(6)
+        cmyk_fallback_edit = QLineEdit(str(self.app_settings.get("cmyk_fallback_icc", "") or ""))
+        cmyk_fallback_edit.setClearButtonEnabled(True)
+        cmyk_fallback_edit.setPlaceholderText(self.t("settings.cmyk_fallback_icc_hint"))
+        cmyk_fallback_browse = QPushButton(self.t("actions.browse"))
+
+        def _browse_cmyk_fallback_icc() -> None:
+            icc_dir = self.store.paths.icc_dir
+            icc_dir.mkdir(parents=True, exist_ok=True)
+            selected, _ = QFileDialog.getOpenFileName(
+                dialog,
+                self.t("file_dialog.select_cmyk_fallback_icc"),
+                str(icc_dir),
+                self.t("file_dialog.icc_files"),
+            )
+            if not selected:
+                return
+            selected_path = Path(selected)
+            try:
+                cmyk_fallback_edit.setText(str(selected_path.relative_to(icc_dir)))
+            except ValueError:
+                cmyk_fallback_edit.setText(str(selected_path))
+
+        cmyk_fallback_browse.clicked.connect(_browse_cmyk_fallback_icc)
+        cmyk_fallback_layout.addWidget(cmyk_fallback_edit, 1)
+        cmyk_fallback_layout.addWidget(cmyk_fallback_browse, 0)
+        form.addRow(self.t("settings.cmyk_fallback_icc"), cmyk_fallback_row)
+
+        orient_enabled_checkbox = QCheckBox(self.t("status.enabled"))
         orient_enabled_checkbox.setChecked(bool(self.app_settings.get("auto_orient_enabled", False)))
-        form.addRow("自适应纸张方向", orient_enabled_checkbox)
+        form.addRow(self.t("settings.auto_orient"), orient_enabled_checkbox)
 
         orientation_combo = QComboBox()
-        orientation_combo.addItem("Portrait", "portrait")
-        orientation_combo.addItem("Landscape", "landscape")
+        orientation_combo.addItem(self.t("settings.orientation.portrait"), "portrait")
+        orientation_combo.addItem(self.t("settings.orientation.landscape"), "landscape")
         orient_idx = orientation_combo.findData(str(self.app_settings.get("target_orientation", "portrait") or "portrait").lower())
         if orient_idx >= 0:
             orientation_combo.setCurrentIndex(orient_idx)
         orientation_combo.setEnabled(orient_enabled_checkbox.isChecked())
         orient_enabled_checkbox.toggled.connect(orientation_combo.setEnabled)
-        form.addRow("目标方向", orientation_combo)
+        form.addRow(self.t("settings.target_orientation"), orientation_combo)
 
-        queue_limit_enabled_checkbox = QCheckBox("启用")
+        queue_limit_enabled_checkbox = QCheckBox(self.t("status.enabled"))
         queue_limit_enabled_checkbox.setChecked(bool(self.app_settings.get("worker_queue_limit_enabled", False)))
-        form.addRow("Worker 最大排队数", queue_limit_enabled_checkbox)
+        form.addRow(self.t("settings.worker_queue_limit"), queue_limit_enabled_checkbox)
 
         queue_limit_spin = QSpinBox()
         queue_limit_spin.setRange(1, 999)
         queue_limit_spin.setValue(int(self.app_settings.get("worker_queue_limit", 3) or 3))
         queue_limit_spin.setEnabled(queue_limit_enabled_checkbox.isChecked())
         queue_limit_enabled_checkbox.toggled.connect(queue_limit_spin.setEnabled)
-        form.addRow("最大排队值", queue_limit_spin)
+        form.addRow(self.t("settings.max_queue_value"), queue_limit_spin)
 
-        tail_balance_enabled_checkbox = QCheckBox("启用")
+        queue_poll_spin = QSpinBox()
+        queue_poll_spin.setRange(1, 60)
+        queue_poll_spin.setSuffix(self.t("settings.seconds_suffix"))
+        queue_poll_spin.setValue(max(1, int(self.app_settings.get("queue_poll_seconds", 5) or 5)))
+        queue_poll_spin.setToolTip(self.t("settings.queue_poll_interval_tip"))
+        queue_poll_spin.setEnabled(queue_limit_enabled_checkbox.isChecked())
+        queue_limit_enabled_checkbox.toggled.connect(queue_poll_spin.setEnabled)
+        form.addRow(self.t("settings.queue_poll_interval"), queue_poll_spin)
+
+        tail_balance_enabled_checkbox = QCheckBox(self.t("status.enabled"))
         tail_balance_enabled_checkbox.setChecked(bool(self.app_settings.get("tail_balance_enabled", False)))
-        form.addRow("尾段动态均衡", tail_balance_enabled_checkbox)
+        form.addRow(self.t("settings.tail_balance"), tail_balance_enabled_checkbox)
 
         tail_balance_idle_spin = QSpinBox()
         tail_balance_idle_spin.setRange(1, 600)
-        tail_balance_idle_spin.setSuffix(" 秒")
+        tail_balance_idle_spin.setSuffix(self.t("settings.seconds_suffix"))
         tail_balance_idle_spin.setValue(int(self.app_settings.get("tail_balance_idle_seconds", 15) or 15))
         tail_balance_idle_spin.setEnabled(tail_balance_enabled_checkbox.isChecked())
         tail_balance_enabled_checkbox.toggled.connect(tail_balance_idle_spin.setEnabled)
-        form.addRow("空闲判定时间（秒）", tail_balance_idle_spin)
+        form.addRow(self.t("settings.tail_idle_seconds"), tail_balance_idle_spin)
 
-        rip_limit_enabled_checkbox = QCheckBox("启用")
+        stop_force_wait_spin = QSpinBox()
+        stop_force_wait_spin.setRange(0, 600)
+        stop_force_wait_spin.setSuffix(self.t("settings.seconds_suffix"))
+        stop_force_wait_spin.setValue(max(0, int(self.app_settings.get("stop_force_wait_seconds", 15) or 0)))
+        stop_force_wait_spin.setToolTip(self.t("settings.stop_force_wait_tip"))
+        form.addRow(self.t("settings.stop_force_wait"), stop_force_wait_spin)
+
+        rip_limit_enabled_checkbox = QCheckBox(self.t("status.enabled"))
         rip_limit_enabled_checkbox.setChecked(bool(self.app_settings.get("rip_limit_enabled", True)))
-        form.addRow("RIP 精度限制", rip_limit_enabled_checkbox)
+        form.addRow(self.t("settings.rip_limit"), rip_limit_enabled_checkbox)
 
         rip_limit_spin = QSpinBox()
         rip_limit_spin.setRange(72, 1200)
@@ -568,13 +905,34 @@ class MainWindow(QMainWindow):
         rip_limit_spin.setValue(int(self.app_settings.get("rip_limit_ppi", 300) or 300))
         rip_limit_spin.setEnabled(rip_limit_enabled_checkbox.isChecked())
         rip_limit_enabled_checkbox.toggled.connect(rip_limit_spin.setEnabled)
-        form.addRow("最大 PPI", rip_limit_spin)
+        form.addRow(self.t("settings.max_ppi"), rip_limit_spin)
+
+        cache_format_combo = QComboBox()
+        cache_format_labels = {
+            CACHE_FORMAT_TIFF_DEFLATE: self.t("settings.cache_format.tiff_deflate"),
+            CACHE_FORMAT_TIFF_NONE: self.t("settings.cache_format.tiff_none"),
+            CACHE_FORMAT_PNG_L1: self.t("settings.cache_format.png_l1"),
+        }
+        for cache_format in CACHE_IMAGE_FORMATS:
+            cache_format_combo.addItem(cache_format_labels.get(cache_format, cache_format), cache_format)
+        cache_format_idx = cache_format_combo.findData(
+            normalize_cache_image_format(self.app_settings.get("cache_image_format"))
+        )
+        if cache_format_idx >= 0:
+            cache_format_combo.setCurrentIndex(cache_format_idx)
+        form.addRow(self.t("settings.cache_image_format"), cache_format_combo)
 
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
+        ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        if ok_button is not None:
+            ok_button.setText(self.t("actions.ok"))
+        if cancel_button is not None:
+            cancel_button.setText(self.t("actions.cancel"))
         layout.addWidget(buttons)
 
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -591,25 +949,31 @@ class MainWindow(QMainWindow):
         self.app_settings["ui_scale"] = new_scale
         self.app_settings["font_engine"] = str(font_engine_combo.currentData() or "auto")
         self.app_settings["ignore_margins"] = bool(ignore_margins_checkbox.isChecked())
+        self.app_settings["fit_mode"] = normalize_fit_mode(fit_mode_combo.currentData())
         self.app_settings["printer_defaults_check_enabled"] = bool(printer_defaults_checkbox.isChecked())
+        self.app_settings["cmyk_fallback_icc"] = cmyk_fallback_edit.text().strip()
         self.app_settings["auto_orient_enabled"] = bool(orient_enabled_checkbox.isChecked())
         self.app_settings["target_orientation"] = str(orientation_combo.currentData())
         self.app_settings["worker_queue_limit_enabled"] = bool(queue_limit_enabled_checkbox.isChecked())
         self.app_settings["worker_queue_limit"] = int(queue_limit_spin.value())
+        self.app_settings["queue_poll_seconds"] = int(queue_poll_spin.value())
         self.app_settings["tail_balance_enabled"] = bool(tail_balance_enabled_checkbox.isChecked())
         self.app_settings["tail_balance_idle_seconds"] = int(tail_balance_idle_spin.value())
+        self.app_settings["stop_force_wait_seconds"] = int(stop_force_wait_spin.value())
         self.app_settings["rip_limit_enabled"] = bool(rip_limit_enabled_checkbox.isChecked())
         self.app_settings["rip_limit_ppi"] = int(rip_limit_spin.value())
+        self.app_settings["cache_image_format"] = normalize_cache_image_format(cache_format_combo.currentData())
         self.store.save_app_settings(self.app_settings)
         if not new_save_tasks:
             self.task_service.clear_session()
         self.apply_ui_scale(new_scale)
+        self.apply_language(refresh_statistics=True)
 
     def open_help_dialog(self) -> None:
         github_url = "https://github.com/hyyz17200/InkSwarm"
 
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"关于 {APP_NAME}")
+        dialog.setWindowTitle(self.t("about.title", app_name=APP_NAME))
         dialog.setModal(True)
         dialog.resize(460, 240)
 
@@ -622,12 +986,7 @@ class MainWindow(QMainWindow):
         title.setFont(title_font)
         layout.addWidget(title)
 
-        body = QLabel(
-            "<p>InkSwarm 是一款面向多打印机批量发送的桌面工具。</p>"
-            "<p>它可以导入 PDF 与图片任务，管理 Worker、打印机和预设配置，"
-            "按设定策略分配份数，并提供发送进度、运行日志和统计记录。</p>"
-            f'<p>GitHub：<a href="{github_url}">hyyz17200/InkSwarm</a></p>'
-        )
+        body = QLabel(self.t("about.body", github_url=github_url))
         body.setWordWrap(True)
         body.setTextFormat(Qt.TextFormat.RichText)
         body.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
@@ -710,12 +1069,177 @@ class MainWindow(QMainWindow):
             QMenuBar::item:selected {{
                 background: rgba(127, 127, 127, 0.14);
             }}
+            QToolButton#languageMenuButton {{
+                padding: 6px 10px;
+                margin: 0 2px;
+                background: transparent;
+                border: none;
+                border-radius: {max(4, base_radius - 1)}px;
+            }}
+            QToolButton#languageMenuButton:hover,
+            QToolButton#languageMenuButton:pressed {{
+                background: rgba(127, 127, 127, 0.14);
+            }}
             QPushButton#primaryActionButton,
             QPushButton#dangerActionButton {{
                 font-weight: 700;
                 padding: {max(10, round(12 * scale / 100))}px;
             }}
+            QLabel#settingsHintLabel {{
+                color: palette(mid);
+                padding: 0 0 6px 0;
+            }}
         """
+
+    def _task_table_headers(self) -> list[str]:
+        return [
+            self.t("task_table.enabled"),
+            self.t("task_table.file"),
+            self.t("task_table.copies"),
+            self.t("task_table.print_size"),
+            self.t("task_table.status"),
+        ]
+
+    def _worker_table_headers(self) -> list[str]:
+        return [
+            self.t("worker_table.enabled"),
+            self.t("worker_table.worker"),
+            self.t("worker_table.printer"),
+            self.t("worker_table.preset"),
+            self.t("worker_table.speed"),
+            self.t("worker_table.status"),
+        ]
+
+    def _enabled_column_width(self, scale: int) -> int:
+        """Width for the checkbox 'Enabled' column, fitted to its header text.
+
+        The header label ('Enabled' in English, '启用' in Chinese) is wider than
+        the checkbox below it, and English is wider than Chinese, so a fixed width
+        clips the label. Derive the width from the rendered header text at the
+        current (scaled) font instead of hardcoding pixels, so it stays correct
+        across languages and UI scales.
+        """
+        app = QApplication.instance()
+        font = app.font() if isinstance(app, QApplication) else self._base_font()
+        metrics = QFontMetrics(font)
+        label = max(
+            (self.t("task_table.enabled"), self.t("worker_table.enabled")),
+            key=metrics.horizontalAdvance,
+        )
+        # QHeaderView::section adds 6px padding per side; leave headroom for the
+        # sort indicator and sub-pixel rounding so the label never clips.
+        fitted = metrics.horizontalAdvance(label) + 28
+        return max(round(56 * scale / 100), fitted)
+
+    def _apply_enabled_column_widths(self, scale: int) -> None:
+        width = self._enabled_column_width(scale)
+        self.task_table.setColumnWidth(0, width)
+        self.worker_table.setColumnWidth(0, width)
+
+    def apply_language(self, refresh_statistics: bool = True) -> None:
+        self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
+        self.settings_action.setText(self.t("menu.settings"))
+        self.open_root_action.setText(self.t("menu.program_dir"))
+        self.print_mgmt_action.setText(self.t("menu.print_management"))
+        self.restart_spooler_action.setText(self.t("menu.restart_queue"))
+        self.help_action.setText(self.t("menu.about"))
+        self._update_language_menu_checks()
+
+        self.task_section_label.setText(self.t("title.task_section"))
+        self.worker_section_label.setText(self.t("title.worker_section"))
+        self.worker_group_label.setText(self.t("worker_group"))
+
+        self.task_table.setHorizontalHeaderLabels(self._task_table_headers())
+        self.worker_table.setHorizontalHeaderLabels(self._worker_table_headers())
+        self._apply_enabled_column_widths(int(self.app_settings.get("ui_scale", 100)))
+        self.btn_add_tasks.setText(self.t("actions.add_files"))
+        self.btn_remove_tasks.setText(self.t("actions.remove_selected"))
+        self.btn_clear_tasks.setText(self.t("actions.clear_tasks"))
+        self.btn_set_task_copies.setText(self.t("actions.batch_copies"))
+        self.btn_reload_workers.setText(self.t("actions.reload_workers"))
+        self.btn_save_workers.setText(self.t("actions.save_worker_settings"))
+        self.btn_open_pref.setText(self.t("actions.open_driver_preferences"))
+        self.btn_open_props.setText(self.t("actions.open_printer_properties"))
+        self.btn_capture.setText(self.t("actions.save_driver_settings"))
+        self._refresh_stop_button_text()
+        self._refresh_start_button_text()
+        self._set_spool_progress_text(self.spool_progress_bar.value())
+
+        self.log_card_tabs.setTabText(0, self.t("tab.log"))
+        self.log_card_tabs.setTabText(1, self.t("tab.today"))
+        self.log_card_tabs.setTabText(2, self.t("tab.current_month"))
+        self.log_card_tabs.setTabText(3, self.t("tab.previous_month"))
+
+        for table in self.statistics_tables.values():
+            table.setHorizontalHeaderLabels(list(self._statistics_display_header(CSV_HEADER)))
+
+        self.refresh_worker_group_combo()
+        self.refresh_task_table()
+        for row, worker in enumerate(self.workers):
+            status_item = self.worker_table.item(row, 5)
+            if status_item is not None:
+                raw_status = status_item.data(Qt.ItemDataRole.UserRole)
+                self._set_worker_status_item(row, str(raw_status or "Idle"))
+            elif row < len(self.workers):
+                self._set_worker_status_item(row, "Idle")
+        self._statistics_loaded_signatures.clear()
+        if refresh_statistics and self._statistics_card_context() is not None:
+            self.refresh_statistics_table(force=True)
+
+    def _refresh_start_button_text(self) -> None:
+        if self._run_state == RUN_STATE_RUNNING:
+            key = "actions.resume" if self.controller.is_paused() else "actions.pause"
+        else:
+            key = "actions.start"
+        self.start_button.setText(self.t(key))
+
+    def _refresh_stop_button_text(self) -> None:
+        if self._run_state == RUN_STATE_STOPPING:
+            if self._force_stop_armed:
+                self.stop_button.setText(self.t("actions.force_stop"))
+            elif self._stopping_seconds_left > 0:
+                self.stop_button.setText(self.t("actions.stopping_countdown", seconds=self._stopping_seconds_left))
+            else:
+                self.stop_button.setText(self.t("actions.stopping"))
+            return
+        self.stop_button.setText(self.t("actions.stop"))
+
+    def _begin_stopping_countdown(self) -> None:
+        if self._stopping_countdown_timer.isActive() or self._force_stop_armed:
+            return
+        wait_seconds = max(0, int(self.app_settings.get("stop_force_wait_seconds", 15) or 0))
+        self._stopping_seconds_left = wait_seconds
+        if wait_seconds <= 0:
+            self._arm_force_stop()
+            return
+        self.stop_button.setEnabled(False)
+        self._stopping_countdown_timer.start()
+        self._refresh_stop_button_text()
+
+    def _on_stopping_countdown_tick(self) -> None:
+        if self._run_state != RUN_STATE_STOPPING:
+            self._end_stopping_countdown()
+            return
+        self._stopping_seconds_left -= 1
+        if self._stopping_seconds_left <= 0:
+            self._arm_force_stop()
+        else:
+            self._refresh_stop_button_text()
+
+    def _arm_force_stop(self) -> None:
+        self._stopping_countdown_timer.stop()
+        self._stopping_seconds_left = 0
+        self._force_stop_armed = True
+        self.stop_button.setEnabled(True)
+        self._refresh_stop_button_text()
+
+    def _end_stopping_countdown(self) -> None:
+        self._stopping_countdown_timer.stop()
+        self._stopping_seconds_left = 0
+        self._force_stop_armed = False
+
+    def _set_spool_progress_text(self, sent: int) -> None:
+        self.spool_progress_label.setText(self.t("spool.progress", sent=int(sent), total=self._spool_total))
 
     @staticmethod
     def _scaled_vertical_pane_heights(scale: int) -> tuple[int, int, int]:
@@ -752,20 +1276,24 @@ class MainWindow(QMainWindow):
         row_size = max(28, round(30 * scale / 100))
         self.task_table.verticalHeader().setDefaultSectionSize(row_size)
         self.worker_table.verticalHeader().setDefaultSectionSize(row_size)
-        button_height = max(88, round(96 * scale / 100))
+        button_height = max(66, round(72 * scale / 100))
         self.start_button.setMinimumHeight(button_height)
         self.stop_button.setMinimumHeight(button_height)
-        self.start_button.setMaximumHeight(button_height + max(12, round(20 * scale / 100)))
-        self.stop_button.setMaximumHeight(button_height + max(12, round(20 * scale / 100)))
+        self.start_button.setMaximumHeight(button_height + max(9, round(15 * scale / 100)))
+        self.stop_button.setMaximumHeight(button_height + max(9, round(15 * scale / 100)))
         self.spool_progress_bar.setMinimumHeight(max(24, round(28 * scale / 100)))
-        self.worker_table.setColumnWidth(0, max(54, round(56 * scale / 100)))
+        # These minimum widths used to be hardcoded, so at high scale their text
+        # grew while the box did not, causing the crowding/clipping. Scale them too.
+        self.preview_label.setMinimumWidth(max(200, round(240 * scale / 100)))
+        self.worker_group_combo.setMinimumWidth(max(130, round(150 * scale / 100)))
+        self.worker_controls_panel.setMinimumWidth(max(130, round(150 * scale / 100)))
+        self._apply_enabled_column_widths(scale)
         self.worker_table.setColumnWidth(1, max(130, round(150 * scale / 100)))
         self.worker_table.setColumnWidth(2, max(130, round(150 * scale / 100)))
         self.worker_table.setColumnWidth(3, max(180, round(225 * scale / 100)))
         self.worker_table.setColumnWidth(4, max(76, round(82 * scale / 100)))
         self.worker_table.setColumnWidth(5, max(110, round(290 * scale / 100)))
         self.task_copies_value_box.setFixedWidth(max(82, round(88 * scale / 100)))
-        self.task_table.setColumnWidth(0, max(54, round(56 * scale / 100)))
         self.task_table.setColumnWidth(2, max(82, round(88 * scale / 100)))
         size_width = max(210, round(230 * scale / 100))
         status_width = max(140, round(250 * scale / 100))
@@ -773,7 +1301,20 @@ class MainWindow(QMainWindow):
         self.task_table.setColumnWidth(4, status_width)
         self.top_splitter.setSizes([max(860, round(1120 * scale / 100)), max(220, round(260 * scale / 100))])
         self._apply_vertical_pane_layout(scale)
+        self._grow_window_for_scale(scale)
         self.update_task_preview()
+
+    def _grow_window_for_scale(self, scale: int) -> None:
+        """Widen the window as the UI scale grows so content has room to breathe,
+        clamped to the screen's work area so it never opens off-screen. Only ever
+        grows, so it never fights a width the user picked manually."""
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry().width()
+        target = min(round(DEFAULT_WINDOW_WIDTH * scale / 100), available)
+        if self.width() < target:
+            self.resize(target, self.height())
 
     def apply_saved_startup_ui_state(self) -> None:
         if self._ui_scale_applied_once:
@@ -841,14 +1382,13 @@ class MainWindow(QMainWindow):
         if pane_heights is not None:
             self.app_settings["vertical_pane_heights"] = list(pane_heights)
 
-    @staticmethod
-    def _display_worker_group_name(group_name: str) -> str:
+    def _display_worker_group_name(self, group_name: str) -> str:
         if group_name == "Workers":
-            return "默认"
+            return self.t("worker.default_group")
         if group_name == "workers":
-            return "默认(legacy)"
+            return self.t("worker.default_legacy_group")
         if group_name.startswith("Workers_"):
-            return group_name[len("Workers_"):] or "默认"
+            return group_name[len("Workers_"):] or self.t("worker.default_group")
         return group_name
 
     def set_console_visibility(self, visible: bool) -> None:
@@ -886,15 +1426,19 @@ class MainWindow(QMainWindow):
         self.reload_workers()
 
     def restore_task_session(self) -> None:
-        result = self.task_service.restore_saved_tasks(self.tasks)
+        result = self.task_service.restore_saved_tasks(
+            self.tasks,
+            language=self.current_language(),
+            cmyk_fallback_icc=self._cmyk_fallback_icc_path(),
+        )
         if result.requested_count <= 0:
             return
         self.refresh_task_table()
         for skipped in result.add_result.skipped:
-            self.on_log_text(f"跳过 {skipped.file_path.name}: {skipped.reason}")
+            self.on_log_text(self.t("log.skip_file", file_name=skipped.file_path.name, reason=self._task_skip_reason_text(skipped)))
         if result.add_result.added_count:
-            self.on_log_text(f"已添加 {result.add_result.added_count} 个任务。")
-        self.on_log_text(f"已恢复 {result.requested_count} 个上次任务。")
+            self.on_log_text(self.t("log.tasks_added", count=result.add_result.added_count))
+        self.on_log_text(self.t("log.restored_tasks", count=result.requested_count))
 
     def _set_task_editing_enabled(self, enabled: bool) -> None:
         for widget in (
@@ -912,58 +1456,70 @@ class MainWindow(QMainWindow):
             return
         files, _ = QFileDialog.getOpenFileNames(
             self,
-            "选择打印文件",
+            self.t("file_dialog.print_files"),
             str(self.root_dir),
-            "Supported Files (*.pdf *.jpg *.jpeg *.png *.tif *.tiff *.bmp)",
+            self.t("file_dialog.supported_files"),
         )
         self.add_files([Path(f) for f in files])
 
     def add_files(self, files: list[Path]) -> None:
         if self.controller.is_running():
             return
-        result = self.task_service.add_files(self.tasks, files, default_copies=self.task_copies_value_box.value())
+        result = self.task_service.add_files(
+            self.tasks,
+            files,
+            default_copies=self.task_copies_value_box.value(),
+            language=self.current_language(),
+            cmyk_fallback_icc=self._cmyk_fallback_icc_path(),
+        )
         self.refresh_task_table()
         for skipped in result.skipped:
-            self.on_log_text(f"跳过 {skipped.file_path.name}: {skipped.reason}")
+            self.on_log_text(self.t("log.skip_file", file_name=skipped.file_path.name, reason=self._task_skip_reason_text(skipped)))
         if result.added_count:
-            self.on_log_text(f"已添加 {result.added_count} 个任务。")
+            self.on_log_text(self.t("log.tasks_added", count=result.added_count))
 
-    @staticmethod
-    def _task_status_text(status: str) -> str:
+    def _task_skip_reason_text(self, skipped: SkippedTaskInput) -> str:
+        if skipped.reason_key:
+            return self.t(skipped.reason_key)
+        return skipped.reason
+
+    def _task_status_text(self, status: str) -> str:
         status_text = (status or "").strip()
         translations = {
-            "Pending": "待处理",
-            "Waiting": "等待中",
-            "Scheduling": "调度中",
-            "Queued": "已入队",
-            "Done": "完成",
-            "Error": "错误",
-            "Disabled": "已停用",
+            "Pending": self.t("status.pending"),
+            "Waiting": self.t("status.waiting"),
+            "Scheduling": self.t("status.scheduling"),
+            "Queued": self.t("status.queued"),
+            "Done": self.t("status.done"),
+            "Error": self.t("status.error"),
+            "Disabled": self.t("status.disabled"),
         }
         if status_text.startswith("Printing "):
-            return f"打印中 {status_text[len('Printing '):]}"
+            return self.t("status.printing_detail", detail=status_text[len("Printing "):])
         return translations.get(status_text, status_text)
 
-    @staticmethod
-    def _worker_status_text(status: str) -> str:
+    def _worker_status_text(self, status: str) -> str:
         status_text = (status or "").strip()
         translations = {
-            "Idle": "空闲",
-            "Stopped": "已停止",
-            "Stopping": "停止中",
-            "Error": "错误",
-            "Paused": "已暂停",
+            "Idle": self.t("status.idle"),
+            "Stopped": self.t("status.stopped"),
+            "Stopping": self.t("status.stopping"),
+            "Error": self.t("status.error"),
+            "Paused": self.t("status.paused"),
         }
         if status_text.startswith("Paused "):
-            return f"已暂停 {status_text[len('Paused '):]}"
+            return self.t("status.paused_detail", detail=status_text[len("Paused "):])
         if status_text.startswith("Preparing "):
-            return f"准备 {status_text[len('Preparing '):]}"
+            return self.t("status.preparing_detail", detail=status_text[len("Preparing "):])
         if status_text.startswith("Printing "):
-            return f"打印中 {status_text[len('Printing '):]}"
+            return self.t("status.printing_detail", detail=status_text[len("Printing "):])
         if status_text.startswith("Waiting printer "):
-            return f"等待打印机 {status_text[len('Waiting printer '):]}"
+            return self.t("status.waiting_printer_detail", detail=status_text[len("Waiting printer "):])
         if status_text.startswith("Queue "):
-            return f"队列 {status_text[len('Queue '):]}"
+            detail = status_text[len("Queue "):]
+            if detail.endswith(", pausing send"):
+                detail = detail[: -len(", pausing send")]
+            return self.t("status.queue_detail", detail=detail.strip())
         return translations.get(status_text, status_text)
 
     def _set_worker_status_item(self, row: int, status: str) -> None:
@@ -974,11 +1530,12 @@ class MainWindow(QMainWindow):
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.worker_table.setItem(row, 5, item)
         display_status = self._worker_status_text(status)
+        item.setData(Qt.ItemDataRole.UserRole, status)
         item.setText(display_status)
         item.setToolTip(display_status)
 
     def refresh_task_table(self) -> None:
-        task_editing_enabled = not self.controller.is_running()
+        task_editing_enabled = self._run_state == RUN_STATE_IDLE
         self.task_table.setRowCount(len(self.tasks))
         self.task_row_by_id.clear()
         for row, task in enumerate(self.tasks):
@@ -1046,7 +1603,7 @@ class MainWindow(QMainWindow):
 
     def clear_tasks(self) -> None:
         if self.controller.is_running():
-            QMessageBox.warning(self, "运行中", "请先停止当前流程。")
+            QMessageBox.warning(self, self.t("dialog.run_active"), self.t("message.cannot_modify_running"))
             return
         self.task_service.clear(self.tasks)
         self.refresh_task_table()
@@ -1070,8 +1627,29 @@ class MainWindow(QMainWindow):
         return wrapper
 
     def reload_workers(self) -> None:
-        self.workers = self.worker_service.load_workers(self.current_worker_group)
         self.worker_config_error = None
+        try:
+            self.workers = self.worker_service.load_workers(self.current_worker_group)
+        except Exception as exc:
+            self.workers = []
+            self.worker_config_error = str(exc)
+            self.on_log_text(self.t("log.worker_load_failed", error=exc))
+            QMessageBox.critical(
+                self,
+                self.t("message.worker_load_failed"),
+                self.t("message.worker_load_failed_detail", error=exc),
+            )
+        else:
+            load_errors = self.worker_service.last_load_errors
+            for path, error in load_errors:
+                self.on_log_text(self.t("log.worker_config_skipped", path=path, error=error))
+            if load_errors:
+                details = "\n".join(f"{path}: {error}" for path, error in load_errors)
+                QMessageBox.warning(
+                    self,
+                    self.t("message.worker_load_warning"),
+                    self.t("message.worker_load_warning_detail", details=details),
+                )
         self.worker_table.setRowCount(len(self.workers))
         self.worker_row_by_name.clear()
         for row, worker in enumerate(self.workers):
@@ -1112,12 +1690,12 @@ class MainWindow(QMainWindow):
 
             self._set_worker_status_item(row, "Idle")
 
-        self.on_log_text(f"已加载方案组 {self.current_worker_group}，共 {len(self.workers)} 个 Worker。")
+        self.on_log_text(self.t("log.worker_group_loaded", group_name=self.current_worker_group, count=len(self.workers)))
         try:
-            self.worker_service.validate_workers(self.workers)
+            self.worker_service.validate_workers(self.workers, language=self.current_language())
         except WorkerValidationError as exc:
             self.worker_config_error = str(exc)
-            self.on_log_text(f"Worker 配置无效：{exc}")
+            self.on_log_text(self.t("log.worker_config_invalid", error=exc))
 
     def save_worker_settings(self) -> None:
         for row, worker in enumerate(self.workers):
@@ -1131,7 +1709,7 @@ class MainWindow(QMainWindow):
             worker.active_preset = preset_combo.currentText() if isinstance(preset_combo, QComboBox) else worker.active_preset
             worker.weight = int(weight_box.value()) if isinstance(weight_box, QSpinBox) else worker.weight
         self.worker_service.save_workers(self.workers)
-        self.on_log_text("Worker配置已保存。")
+        self.on_log_text(self.t("log.worker_settings_saved"))
 
     def _selected_worker(self) -> WorkerConfig | None:
         row = self.worker_table.currentRow()
@@ -1143,10 +1721,14 @@ class MainWindow(QMainWindow):
     def _printer_defaults_check_enabled(self) -> bool:
         return bool(self.app_settings.get("printer_defaults_check_enabled", True))
 
+    def _cmyk_fallback_icc_path(self) -> Path | None:
+        return resolve_icc_path(self.store.paths.icc_dir, str(self.app_settings.get("cmyk_fallback_icc", "") or ""))
+
     def _restore_worker_preset_if_any(self, worker: WorkerConfig) -> None:
         message = self.worker_service.restore_preset_if_any(
             worker,
             initialize_defaults=self._printer_defaults_check_enabled(),
+            language=self.current_language(),
         )
         if message:
             self.on_log_text(message)
@@ -1154,51 +1736,59 @@ class MainWindow(QMainWindow):
     def open_selected_worker_preferences(self) -> None:
         worker = self._selected_worker()
         if worker is None:
-            QMessageBox.information(self, "提示", "请先选中一个 Worker。")
+            QMessageBox.information(self, self.t("dialog.info"), self.t("message.no_selected_worker"))
             return
         if not worker.printer_name:
-            QMessageBox.warning(self, "提示", "该 Worker 还没有填写打印机名称。")
+            QMessageBox.warning(self, self.t("dialog.info"), self.t("message.no_printer_name"))
             return
         try:
             self._restore_worker_preset_if_any(worker)
-            self.worker_service.open_preferences(worker)
+            self.worker_service.open_preferences(worker, language=self.current_language())
         except Exception as exc:
-            QMessageBox.critical(self, "打开失败", str(exc))
+            QMessageBox.critical(self, self.t("dialog.open_failed"), str(exc))
 
     def open_selected_worker_properties(self) -> None:
         worker = self._selected_worker()
         if worker is None:
-            QMessageBox.information(self, "提示", "请先选中一个 Worker。")
+            QMessageBox.information(self, self.t("dialog.info"), self.t("message.no_selected_worker"))
             return
         if not worker.printer_name:
-            QMessageBox.warning(self, "提示", "该 Worker 还没有填写打印机名称。")
+            QMessageBox.warning(self, self.t("dialog.info"), self.t("message.no_printer_name"))
             return
         try:
-            self.worker_service.open_properties(worker)
+            self.worker_service.open_properties(worker, language=self.current_language())
         except Exception as exc:
-            QMessageBox.critical(self, "打开失败", str(exc))
+            QMessageBox.critical(self, self.t("dialog.open_failed"), str(exc))
 
     def capture_selected_worker_snapshot(self) -> None:
         worker = self._selected_worker()
         if worker is None:
-            QMessageBox.information(self, "提示", "请先选中一个 Worker。")
+            QMessageBox.information(self, self.t("dialog.info"), self.t("message.no_selected_worker"))
             return
         if not worker.printer_name:
-            QMessageBox.warning(self, "提示", "该 Worker 还没有填写打印机名称。")
+            QMessageBox.warning(self, self.t("dialog.info"), self.t("message.no_printer_name"))
             return
         try:
             preset_name = worker.get_active_preset().name
             snapshot_path = self.worker_service.capture_snapshot(
                 worker,
                 initialize_defaults=self._printer_defaults_check_enabled(),
+                language=self.current_language(),
             )
-            self.on_log_text(f"已导出 {worker.name}/{preset_name} 的驱动快照: {snapshot_path.name}")
+            self.on_log_text(
+                self.t(
+                    "worker.exported_snapshot",
+                    worker_name=worker.name,
+                    preset_name=preset_name,
+                    snapshot_name=snapshot_path.name,
+                )
+            )
         except Exception as exc:
-            QMessageBox.critical(self, "导出失败", str(exc))
+            QMessageBox.critical(self, self.t("dialog.error"), str(exc))
 
     def start_or_toggle_pause(self) -> None:
         if self._spooler_maintenance_active:
-            QMessageBox.information(self, "处理中", "正在维护打印队列，完成前不会恢复发送。")
+            QMessageBox.information(self, self.t("dialog.processing"), self.t("spool.restart_running"))
             return
         if self.controller.is_running():
             self.controller.toggle_pause()
@@ -1207,63 +1797,86 @@ class MainWindow(QMainWindow):
 
     def start_run(self) -> None:
         if not self.tasks:
-            QMessageBox.information(self, "提示", "请先添加任务。")
+            QMessageBox.information(self, self.t("dialog.info"), self.t("message.add_tasks_first"))
             return
         if not any(task.enabled for task in self.tasks):
-            QMessageBox.information(self, "提示", "请至少勾选一个要发送的任务。")
+            QMessageBox.information(self, self.t("dialog.info"), self.t("message.select_enabled_task"))
             return
         self.save_worker_settings()
         try:
-            self.worker_service.validate_workers(self.workers)
+            self.worker_service.validate_workers(self.workers, language=self.current_language())
         except WorkerValidationError as exc:
             self.worker_config_error = str(exc)
-            self.on_log_text(f"Worker 配置无效：{exc}")
+            self.on_log_text(self.t("log.worker_config_invalid", error=exc))
             QMessageBox.critical(
                 self,
-                "Worker配置无效",
-                f"Worker 名称必须唯一，且不能为空。\n\n{exc}",
+                self.t("message.worker_config_invalid"),
+                self.t("message.worker_config_invalid_detail", error=exc),
             )
             return
         try:
-            self.controller.validate_environment()
+            self.controller.validate_environment(language=self.current_language())
         except Exception as exc:
             debug_exception("MainWindow.start_run.environment", exc)
-            QMessageBox.critical(self, "环境检查失败", str(exc))
+            QMessageBox.critical(self, self.t("message.environment_check_failed"), str(exc))
             return
         self.task_service.reset_for_run(self.tasks)
         self.refresh_task_table()
-        prepared = self.run_service.prepare_start(self.tasks, self.workers, self.app_settings)
+        prepared = self.run_service.prepare_start(
+            self.tasks,
+            self.workers,
+            self.app_settings,
+            icc_dir=self.store.paths.icc_dir,
+        )
         self._spool_total = prepared.spool_total
         self.spool_progress_bar.setRange(0, max(1, self._spool_total))
         self.spool_progress_bar.setValue(0)
-        self.spool_progress_label.setText(f"已发送: 0 / {self._spool_total}")
+        self._set_spool_progress_text(0)
         debug_log(f"start_run with options={prepared.run_options} tasks={[(t.file_name(), t.copies) for t in prepared.tasks]}")
+        self.regular_log_filter.reset()
         try:
             self.controller.start(prepared.tasks, prepared.workers, prepared.run_options)
         except Exception as exc:
-            QMessageBox.critical(self, "启动失败", str(exc))
+            QMessageBox.critical(self, self.t("dialog.start_failed"), str(exc))
 
     def stop_run(self) -> None:
+        if self._run_state == RUN_STATE_STOPPING:
+            if not self._force_stop_armed:
+                return
+            # User explicitly chose Force Stop after the gentle wait ran out.
+            self._force_stop_armed = False
+            self.stop_button.setEnabled(False)
+            self.controller.force_stop()
+            # Re-run the countdown so another force attempt stays available if
+            # something is still stuck after the kill.
+            self._begin_stopping_countdown()
+            self._refresh_stop_button_text()
+            return
         if not self.controller.is_running():
             return
         self.controller.stop()
 
     def restart_print_queue(self) -> None:
         if self._spooler_maintenance_active:
-            QMessageBox.information(self, "处理中", "打印队列维护正在执行，请等待完成。")
+            QMessageBox.information(self, self.t("dialog.processing"), self.t("spool.maintenance_active"))
             return
+
+        # A spooler restart is machine-wide: warn up front (dialog + log) when
+        # queues outside the observed worker printers hold jobs too.
+        other_jobs_warning = self._other_printer_jobs_warning()
+        if other_jobs_warning:
+            self.on_log_text(other_jobs_warning)
+        informative = self.t("spool.dialog_warning")
+        if other_jobs_warning:
+            informative = f"{other_jobs_warning}\n\n{informative}"
 
         dialog = QMessageBox(self)
         dialog.setIcon(QMessageBox.Icon.Warning)
-        dialog.setWindowTitle("重启打印队列")
-        dialog.setText("此操作会暂停 InkSwarm，并重启 Windows Print Spooler。")
-        dialog.setInformativeText(
-            "已发送到 Windows 打印队列的任务不会由 InkSwarm 管理。"
-            "重启过程中所有打印机都可能短暂不可用。\n\n"
-            "此操作需要管理员权限。主窗口可以保持普通权限运行，InkSwarm 会在需要时临时请求管理员权限。"
-        )
-        restart_button = dialog.addButton("确认重启", QMessageBox.ButtonRole.AcceptRole)
-        cancel_button = dialog.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        dialog.setWindowTitle(self.t("spool.dialog_title"))
+        dialog.setText(self.t("spool.dialog_text"))
+        dialog.setInformativeText(informative)
+        restart_button = dialog.addButton(self.t("spool.confirm_restart"), QMessageBox.ButtonRole.AcceptRole)
+        cancel_button = dialog.addButton(self.t("actions.cancel"), QMessageBox.ButtonRole.RejectRole)
         dialog.setDefaultButton(cancel_button)
         dialog.setEscapeButton(cancel_button)
         dialog.exec()
@@ -1272,96 +1885,112 @@ class MainWindow(QMainWindow):
         if clicked == restart_button:
             self.start_spooler_maintenance()
 
+    def _enabled_worker_printer_names(self) -> list[str]:
+        names: list[str] = []
+        for worker in self.workers:
+            name = worker.printer_name.strip()
+            if worker.enabled and name and name not in names:
+                names.append(name)
+        return names
+
+    def _other_printer_jobs_warning(self) -> str | None:
+        try:
+            others = list_printers_with_jobs(exclude=set(self._enabled_worker_printer_names()))
+        except Exception as exc:
+            debug_exception("MainWindow._other_printer_jobs_warning", exc)
+            return None
+        if not others:
+            return None
+        printers = ", ".join(f"{snapshot.printer_name} ×{snapshot.job_count}" for snapshot in others)
+        return self.t("spool.other_printers_warning", printers=printers)
+
     def start_spooler_maintenance(self) -> None:
         self._spooler_maintenance_active = True
         self.restart_spooler_action.setEnabled(False)
         was_running = self.controller.is_running()
         if was_running:
-            self.on_log_text("准备维护打印队列，InkSwarm 正在暂停发送。")
+            self.on_log_text(self.t("spool.maintenance_pause_log"))
             self.controller.pause()
         else:
-            self.on_log_text("准备维护打印队列。")
+            self.on_log_text(self.t("spool.maintenance_start_log"))
 
+        language = self.current_language()
+        control = MaintenanceControl()
+        maintenance_dialog = SpoolerMaintenanceDialog(self, translator=self.t, control=control)
+        self._spooler_maintenance_dialog = maintenance_dialog
+        maintenance_dialog.show()
+
+        def restart_service(log) -> None:
+            if SpoolerMaintenance.is_process_elevated():
+                SpoolerMaintenance(timeout_seconds=120.0, language=language).restart(log=log)
+            else:
+                log(translate(language, "spool.request_admin_log"))
+                run_elevated_spooler_maintenance(timeout_seconds=120.0, log=log, language=language)
+
+        flow = SpoolerMaintenanceFlow(
+            controller=self.controller,
+            printer_names=self._enabled_worker_printer_names(),
+            control=control,
+            restart=restart_service,
+            on_status=self.spooler_maintenance_status.emit,
+            on_log=self.spooler_maintenance_log.emit,
+            was_running=was_running,
+            language=language,
+        )
         thread = threading.Thread(
-            target=self._run_spooler_maintenance,
-            args=(was_running,),
+            target=lambda: self.spooler_maintenance_finished.emit(flow.run()),
             daemon=True,
             name="SpoolerMaintenance",
         )
         thread.start()
 
-    def _run_spooler_maintenance(self, resume_after_success: bool) -> None:
-        try:
-            if resume_after_success:
-                self.spooler_maintenance_log.emit("等待 InkSwarm 暂停稳定。")
-                if not self.controller.wait_until_paused_idle(timeout_seconds=15.0):
-                    raise RuntimeError("InkSwarm 在 15 秒内未进入稳定暂停状态，未继续重启 Print Spooler。")
-                self.spooler_maintenance_log.emit("InkSwarm 已稳定暂停。")
+    def on_spooler_maintenance_log(self, message: str) -> None:
+        self.on_log_text(message)
+        if self._spooler_maintenance_dialog is not None:
+            self._spooler_maintenance_dialog.append_log(message)
 
-            if SpoolerMaintenance.is_process_elevated():
-                maintenance = SpoolerMaintenance(timeout_seconds=120.0)
-                result = maintenance.restart(
-                    log=lambda message: self.spooler_maintenance_log.emit(message),
-                )
-            else:
-                self.spooler_maintenance_log.emit("主窗口不是管理员权限，正在请求临时管理员权限执行 Print Spooler 维护。")
-                result = run_elevated_spooler_maintenance(
-                    timeout_seconds=120.0,
-                    log=lambda message: self.spooler_maintenance_log.emit(message),
-                )
-            self.spooler_maintenance_finished.emit(
-                {
-                    "ok": True,
-                    "resume_after_success": resume_after_success,
-                }
-            )
-        except SpoolerMaintenanceCancelled as exc:
-            self.spooler_maintenance_finished.emit(
-                {
-                    "ok": False,
-                    "cancelled": True,
-                    "was_running": resume_after_success,
-                    "error": str(exc),
-                }
-            )
-        except Exception as exc:
-            debug_exception("MainWindow._run_spooler_maintenance", exc)
-            self.spooler_maintenance_finished.emit(
-                {
-                    "ok": False,
-                    "was_running": resume_after_success,
-                    "error": str(exc),
-                }
-            )
+    def on_spooler_maintenance_status(self, status: object) -> None:
+        if isinstance(status, MaintenanceStatus) and self._spooler_maintenance_dialog is not None:
+            self._spooler_maintenance_dialog.update_status(status)
 
     def on_spooler_maintenance_finished(self, result: object) -> None:
         self._spooler_maintenance_active = False
         self.restart_spooler_action.setEnabled(True)
+        maintenance_dialog = self._spooler_maintenance_dialog
+        self._spooler_maintenance_dialog = None
 
-        data = result if isinstance(result, dict) else {}
-        if data.get("ok"):
-            if data.get("resume_after_success") and self.controller.is_running():
-                self.controller.resume()
-            QMessageBox.information(self, "打印队列已恢复", "Windows Print Spooler 已重启完成。")
+        outcome = result if isinstance(result, MaintenanceOutcome) else MaintenanceOutcome()
+        stays_paused = outcome.was_running and self.controller.is_running()
+        if outcome.ok:
+            # Deliberately no auto-resume: after a spooler restart the user
+            # should confirm printer state before printing continues.
+            message = self.t("spool.restart_complete")
+            if stays_paused:
+                message += self.t("spool.stays_paused")
+            self.on_log_text(self.t("spool.restart_complete"))
+            if maintenance_dialog is not None:
+                maintenance_dialog.mark_finished(True, message)
             return
 
-        error = str(data.get("error") or "未知错误")
-        if data.get("cancelled"):
-            if data.get("was_running") and self.controller.is_running():
+        error = outcome.error or self.t("spool.unknown_error")
+        if outcome.cancelled:
+            # Nothing irreversible happened before the restart stage, so
+            # cancelling returns to the pre-maintenance state, including
+            # resuming a paused run.
+            if stays_paused:
                 self.controller.resume()
-            QMessageBox.information(self, "已取消", error)
+            self.on_log_text(self.t("spool.maintenance_cancelled_log"))
+            if maintenance_dialog is not None:
+                maintenance_dialog.close_silently()
             return
-        pause_text = ""
-        if data.get("was_running") and self.controller.is_running():
-            pause_text = "\n\nInkSwarm 已保持暂停状态，请确认后再选择恢复、停止或重新尝试。"
-        QMessageBox.warning(
-            self,
-            "打印队列维护失败",
-            f"{error}{pause_text}",
-        )
+
+        message = f"{error}{self.t('spool.stays_paused') if stays_paused else ''}"
+        self.on_log_text(f"{self.t('spool.maintenance_failed')}: {error}")
+        if maintenance_dialog is not None:
+            maintenance_dialog.mark_finished(False, message)
 
     def on_log(self, message) -> None:
-        self.on_log_text(message.format())
+        self.on_log_text(message.format(), once_key=getattr(message, "once_key", None))
 
     def on_log_card_changed(self, index: int) -> None:
         self.log_stack.setCurrentIndex(index)
@@ -1400,7 +2029,7 @@ class MainWindow(QMainWindow):
                 report = self.statistics_report_reader.read_monthly_report(month)
         except Exception as exc:
             debug_exception("MainWindow.refresh_statistics_table", exc)
-            status_label.setText(f"读取统计 CSV 失败: {exc}")
+            status_label.setText(self.t("statistics.csv_read_failed", error=exc))
             table.setRowCount(0)
             return
 
@@ -1433,7 +2062,7 @@ class MainWindow(QMainWindow):
 
     def _populate_statistics_table(self, table: QTableWidget, header: tuple[str, ...], rows: tuple[tuple[str, ...], ...]) -> None:
         display_columns = self._statistics_display_columns(header)
-        display_header = tuple(header[column] for column in display_columns)
+        display_header = self._statistics_display_header(header)
         previous_signal_state = table.blockSignals(True)
         table.setUpdatesEnabled(False)
         try:
@@ -1444,7 +2073,8 @@ class MainWindow(QMainWindow):
             table.setRowCount(len(rows))
             for row_index, row in enumerate(rows):
                 for display_index, source_index in enumerate(display_columns):
-                    value = row[source_index] if source_index < len(row) else ""
+                    raw_value = row[source_index] if source_index < len(row) else ""
+                    value = self._statistics_cell_text(header, source_index, raw_value)
                     item = QTableWidgetItem(str(value))
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     if source_index in {0, 1, 3, 4, 5, 6}:
@@ -1463,9 +2093,19 @@ class MainWindow(QMainWindow):
             if column_name not in STATISTICS_HIDDEN_COLUMNS
         )
 
-    @classmethod
-    def _statistics_display_header(cls, header: list[str] | tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(header[column_index] for column_index in cls._statistics_display_columns(header))
+    def _statistics_display_header(self, header: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(
+            self.t(f"statistics.header.{header[column_index]}")
+            for column_index in self._statistics_display_columns(header)
+        )
+
+    def _statistics_cell_text(self, header: list[str] | tuple[str, ...], column_index: int, value: str) -> str:
+        if column_index < len(header) and header[column_index] == "Completion Status":
+            if value == "Complete":
+                return self.t("statistics.value.complete")
+            if value == "Incomplete":
+                return self.t("statistics.value.incomplete")
+        return value
 
     def _statistics_status_text(
         self,
@@ -1475,28 +2115,28 @@ class MainWindow(QMainWindow):
         row_count: int,
         total_success_copies: int,
     ) -> str:
-        success_text = f"总成功张数: {total_success_copies}"
+        success_text = self.t("statistics.total_success", count=total_success_copies)
         if statistics_key == "today":
             if not exists:
-                return f"{display_label} - 本月还没有统计 CSV - {success_text}"
+                return f"{display_label} - {self.t('statistics.no_current_month_csv')} - {success_text}"
             if row_count:
-                return f"{display_label} - {row_count} 条今日任务记录 - {success_text}"
-            return f"{display_label} - 今日暂无任务记录 - {success_text}"
+                return f"{display_label} - {self.t('statistics.today_rows', count=row_count)} - {success_text}"
+            return f"{display_label} - {self.t('statistics.no_today_rows')} - {success_text}"
         if statistics_key == "previous_month":
             if not exists:
-                return f"{display_label} - 上月还没有统计 CSV - {success_text}"
+                return f"{display_label} - {self.t('statistics.no_previous_month_csv')} - {success_text}"
             if row_count:
-                return f"{display_label} - {row_count} 条上月任务记录 - {success_text}"
-            return f"{display_label} - 上月暂无任务记录 - {success_text}"
+                return f"{display_label} - {self.t('statistics.previous_month_rows', count=row_count)} - {success_text}"
+            return f"{display_label} - {self.t('statistics.no_previous_month_rows')} - {success_text}"
         if not exists:
-            return f"{display_label} - 本月还没有统计 CSV - {success_text}"
+            return f"{display_label} - {self.t('statistics.no_current_month_csv')} - {success_text}"
         if row_count:
-            return f"{display_label} - {row_count} 条本月任务记录 - {success_text}"
-        return f"{display_label} - 本月暂无任务记录 - {success_text}"
+            return f"{display_label} - {self.t('statistics.current_month_rows', count=row_count)} - {success_text}"
+        return f"{display_label} - {self.t('statistics.no_current_month_rows')} - {success_text}"
 
-    def on_log_text(self, text: str) -> None:
+    def on_log_text(self, text: str, once_key: str | None = None) -> None:
         debug_log(f"app-log {text}")
-        if not self.regular_log_filter.should_write(text):
+        if not self.regular_log_filter.should_write(text, once_key=once_key):
             return
         self.log_edit.appendPlainText(text)
         self.log_writer.append_line(text)
@@ -1505,7 +2145,7 @@ class MainWindow(QMainWindow):
         self._spool_total = max(0, int(total))
         self.spool_progress_bar.setRange(0, max(1, self._spool_total))
         self.spool_progress_bar.setValue(max(0, int(sent)))
-        self.spool_progress_label.setText(f"已发送: {int(sent)} / {self._spool_total}")
+        self._set_spool_progress_text(int(sent))
 
     def on_task_status(self, status: TaskStatusMessage) -> None:
         task = self.task_service.apply_status(self.tasks, status)
@@ -1513,7 +2153,7 @@ class MainWindow(QMainWindow):
             return
         self.refresh_task_row(task)
         if status.error_message:
-            self.on_log_text(f"任务 {task.file_name()} 错误: {status.error_message}")
+            self.on_log_text(self.t("task.error_log", file_name=task.file_name(), error=status.error_message))
 
     def refresh_task_row(self, task: TaskItem) -> None:
         row = self.task_row_by_id.get(task.task_id)
@@ -1530,24 +2170,39 @@ class MainWindow(QMainWindow):
             return
         self._set_worker_status_item(row, status.status)
 
-    def on_run_state_changed(self, running: bool) -> None:
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(running)
-        self._set_task_editing_enabled(not running)
-        if running:
-            self.start_button.setText("暂停")
-            self.spool_progress_bar.setValue(0)
+    def on_run_state_changed(self, state: str) -> None:
+        self._run_state = state
+        running = state == RUN_STATE_RUNNING
+        stopping = state == RUN_STATE_STOPPING
+        idle = state == RUN_STATE_IDLE
+        # While stopping, starting makes no sense: the run only truly ends
+        # (IDLE) once every worker thread has exited. The stop button first
+        # waits out the gentle-wait countdown, then re-arms as "Force Stop".
+        self.start_button.setEnabled(not stopping)
+        if stopping:
+            self._begin_stopping_countdown()
         else:
-            self.start_button.setText("开始发送")
+            self._end_stopping_countdown()
+            self.stop_button.setEnabled(running)
+        self._refresh_stop_button_text()
+        self._set_task_editing_enabled(idle)
+        if running:
+            self.spool_progress_bar.setValue(0)
+        self._refresh_start_button_text()
         self.refresh_task_table()
-        self.on_log_text("流程已启动。" if running else "流程已结束。")
-        if not running and self._statistics_card_context() is not None:
+        if running:
+            self.on_log_text(self.t("log.flow_started"))
+        elif stopping:
+            self.on_log_text(self.t("log.flow_stopping"))
+        else:
+            self.on_log_text(self.t("log.flow_ended"))
+        if idle and self._statistics_card_context() is not None:
             self.refresh_statistics_table(force=True)
 
     def on_pause_state_changed(self, paused: bool) -> None:
         if not self.controller.is_running():
             return
-        self.start_button.setText("恢复" if paused else "暂停")
+        self._refresh_start_button_text()
 
     def update_task_preview(self) -> None:
         row = self.task_table.currentRow()
@@ -1584,9 +2239,9 @@ class MainWindow(QMainWindow):
             if sys.platform == "win32":
                 os.startfile("printmanagement.msc")
             else:
-                self.on_log_text("当前平台不支持启动 printmanagement.msc。")
+                self.on_log_text(self.t("log.print_mgmt_unsupported"))
         except Exception as exc:
-            QMessageBox.warning(self, "启动失败", f"无法启动打印管理器：{exc}")
+            QMessageBox.warning(self, self.t("dialog.start_failed"), self.t("message.open_print_management_failed", error=exc))
 
     def open_program_dir(self) -> None:
         self._open_path(self.root_dir)
@@ -1594,7 +2249,7 @@ class MainWindow(QMainWindow):
     def clear_cache_dir(self, log_message: bool = True) -> None:
         self.cache_service.clear()
         if log_message:
-            self.on_log_text("缓存目录已清理。")
+            self.on_log_text(self.t("log.cache_cleared"))
 
     def _open_path(self, path: Path) -> None:
         if sys.platform == "win32":
@@ -1604,11 +2259,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         if self._spooler_maintenance_active:
-            QMessageBox.warning(self, "处理中", "正在维护打印队列，请等待完成后再退出。")
+            QMessageBox.warning(self, self.t("dialog.processing"), self.t("message.cannot_exit_spooler"))
             event.ignore()
             return
         if self.controller.is_running():
-            QMessageBox.warning(self, "运行中", "请先停止当前流程后再退出。")
+            QMessageBox.warning(self, self.t("dialog.run_active"), self.t("message.cannot_exit_running"))
             event.ignore()
             return
         self.save_worker_settings()
@@ -1659,11 +2314,13 @@ def run() -> None:
     app.setApplicationName(APP_NAME)
     install_qt_message_handler()
     debug_log(f"QApplication started argv={sys.argv}")
+    language = "en"
     try:
-        PrintController.validate_environment()
+        language = normalize_language(store.load_app_settings().get("language", "en"))
+        PrintController.validate_environment(language=language)
     except Exception as exc:
         debug_exception("run.environment", exc)
-        QMessageBox.critical(None, "环境检查失败", str(exc))
+        QMessageBox.critical(None, translate(language, "message.environment_check_failed"), str(exc))
         sys.exit(1)
     window = MainWindow()
     window.show()

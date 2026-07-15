@@ -6,12 +6,15 @@ from pathlib import Path
 from typing import Any, cast
 
 import pypdfium2 as pdfium
-from PIL import Image, ImageCms, ImageFile
+from PIL import Image, ImageCms, ImageOps
 
+from .i18n import normalize_language, translate
 from .models import DEFAULT_RASTER_DPI
+from .pdfium_lock import PDFIUM_LOCK
 
 Image.MAX_IMAGE_PIXELS = None
-ImageFile.LOAD_TRUNCATED_IMAGES = True
+# Do NOT enable ImageFile.LOAD_TRUNCATED_IMAGES: incomplete or corrupt bitmaps must
+# raise during decode so they are rejected, never printed as partial output.
 
 MM_PER_INCH = 25.4
 PDF_POINTS_PER_INCH = 72.0
@@ -28,45 +31,73 @@ class TaskInspectionError(RuntimeError):
     pass
 
 
-def inspect_task_input(file_path: Path, preview_max_size: tuple[int, int] = (320, 320)) -> TaskInspection:
+def inspect_task_input(
+    file_path: Path,
+    preview_max_size: tuple[int, int] = (320, 320),
+    language: str = "en",
+    cmyk_fallback_icc: Path | None = None,
+) -> TaskInspection:
+    language = normalize_language(language)
     suffix = file_path.suffix.lower()
     if suffix == ".pdf":
-        return _inspect_pdf(file_path, preview_max_size)
-    return _inspect_image(file_path, preview_max_size)
+        return _inspect_pdf(file_path, preview_max_size, language)
+    return _inspect_image(file_path, preview_max_size, language, cmyk_fallback_icc)
 
 
-def _inspect_pdf(file_path: Path, preview_max_size: tuple[int, int]) -> TaskInspection:
-    document = pdfium.PdfDocument(str(file_path))
+def _cmyk_fallback_available(cmyk_fallback_icc: Path | None) -> bool:
+    return cmyk_fallback_icc is not None and cmyk_fallback_icc.exists()
+
+
+def _inspect_pdf(file_path: Path, preview_max_size: tuple[int, int], language: str) -> TaskInspection:
+    document: pdfium.PdfDocument | None = None
     try:
-        if len(document) == 0:
-            raise TaskInspectionError("PDF 没有页面")
-        first_page = document[0]
-        width_pt = float(first_page.get_width())
-        height_pt = float(first_page.get_height())
-        width_mm = width_pt * MM_PER_INCH / PDF_POINTS_PER_INCH
-        height_mm = height_pt * MM_PER_INCH / PDF_POINTS_PER_INCH
-        display = _format_mm(width_mm, height_mm, len(document))
-        preview_scale = min(preview_max_size) / max(width_pt, height_pt)
-        # pypdfium2 accepts a float scale, but Pylance infers int from the default value.
-        bitmap = first_page.render(scale=cast(Any, preview_scale), optimize_mode="lcd")
-        image = bitmap.to_pil().convert("RGB")
-        preview = _image_to_png_bytes(image, preview_max_size)
-        return TaskInspection(display_size_mm=display, preview_bytes=preview, page_count=len(document))
+        with PDFIUM_LOCK:
+            try:
+                document = pdfium.PdfDocument(str(file_path))
+                if len(document) == 0:
+                    raise TaskInspectionError(translate(language, "task_inspector.empty_pdf"))
+                first_page = document[0]
+                width_pt = float(first_page.get_width())
+                height_pt = float(first_page.get_height())
+                width_mm = width_pt * MM_PER_INCH / PDF_POINTS_PER_INCH
+                height_mm = height_pt * MM_PER_INCH / PDF_POINTS_PER_INCH
+                display = _format_mm(width_mm, height_mm, len(document))
+                preview_scale = min(preview_max_size) / max(width_pt, height_pt)
+                # pypdfium2 accepts a float scale, but Pylance infers int from the default value.
+                bitmap = first_page.render(scale=cast(Any, preview_scale), optimize_mode="lcd")
+                image = bitmap.to_pil().convert("RGB")
+                preview = _image_to_png_bytes(image, preview_max_size)
+                return TaskInspection(display_size_mm=display, preview_bytes=preview, page_count=len(document))
+            finally:
+                if document is not None:
+                    document.close()
     except TaskInspectionError:
         raise
     except Exception as exc:
         raise TaskInspectionError(str(exc)) from exc
-    finally:
-        document.close()
 
 
-def _inspect_image(file_path: Path, preview_max_size: tuple[int, int]) -> TaskInspection:
+def _inspect_image(
+    file_path: Path,
+    preview_max_size: tuple[int, int],
+    language: str,
+    cmyk_fallback_icc: Path | None = None,
+) -> TaskInspection:
     try:
         with Image.open(file_path) as image:
+            # Force a full decode up front so a truncated/incomplete bitmap raises
+            # here instead of being silently printed as a partial image later.
+            try:
+                image.load()
+            except OSError as exc:
+                raise TaskInspectionError(translate(language, "task_inspector.truncated")) from exc
+            image = apply_exif_orientation(image)
             mode = image.mode
             embedded_profile = image.info.get("icc_profile")
-            if mode == "CMYK" and not embedded_profile:
-                raise TaskInspectionError("CMYK 文件没有嵌入 ICC，已跳过")
+            # CMYK can only be interpreted with an embedded profile or, failing
+            # that, the global CMYK fallback ICC. Reject only when neither exists.
+            if mode == "CMYK" and not embedded_profile and not _cmyk_fallback_available(cmyk_fallback_icc):
+                raise TaskInspectionError(translate(language, "task_inspector.cmyk_missing_icc"))
 
             dpi_x, dpi_y = get_image_dpi(image)
             width_mm = image.width / dpi_x * MM_PER_INCH
@@ -80,6 +111,38 @@ def _inspect_image(file_path: Path, preview_max_size: tuple[int, int]) -> TaskIn
         raise
     except Exception as exc:
         raise TaskInspectionError(str(exc)) from exc
+
+
+def apply_exif_orientation(image: Image.Image) -> Image.Image:
+    """Apply the EXIF Orientation tag so pixels match what image viewers show.
+
+    Cameras and phones commonly store the raw sensor bitmap plus an
+    Orientation tag; without applying it, sizing, preview and print all use
+    the unrotated pixels and the output comes out rotated/mirrored relative
+    to what every viewer displays. Returns the image unchanged when there is
+    no tag or it is the identity (the common case for production artwork),
+    so no extra decode/copy happens on that path. Pillow preserves the info
+    dict (dpi, icc_profile) across the transpose and drops the consumed
+    Orientation tag from the result's EXIF.
+    """
+    try:
+        orientation = image.getexif().get(0x0112)
+    except Exception:
+        return image
+    if not orientation or orientation == 1:
+        return image
+    transposed = ImageOps.exif_transpose(image)
+    if transposed is None:
+        return image
+    if orientation in {5, 6, 7, 8}:
+        # These orientations exchange the pixel axes. Pillow carries image.info
+        # across unchanged, so non-square physical resolution must follow the
+        # same exchange or the upright image gets the wrong millimetre size.
+        for key in ("dpi", "resolution"):
+            value = transposed.info.get(key)
+            if isinstance(value, tuple) and len(value) >= 2:
+                transposed.info[key] = (value[1], value[0], *value[2:])
+    return transposed
 
 
 def get_image_dpi(image: Image.Image) -> tuple[float, float]:
@@ -111,5 +174,5 @@ def _image_to_png_bytes(image: Image.Image, preview_max_size: tuple[int, int]) -
 def _format_mm(width_mm: float, height_mm: float, page_count: int) -> str:
     base = f"{round(width_mm)} × {round(height_mm)} mm"
     if page_count > 1:
-        return f"{base} · {page_count}页"
+        return f"{base} · {page_count} pages"
     return base

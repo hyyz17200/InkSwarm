@@ -43,6 +43,15 @@ class StaticSchedulerRegressionTests(TestCase):
 
         self.assertEqual([(entry.worker_name, entry.copies) for entry in result], [("A", 25), ("B", 5)])
 
+    def test_scheduler_errors_default_to_english_and_can_localize_to_chinese(self) -> None:
+        disabled = worker("A")
+        disabled.enabled = False
+
+        with self.assertRaisesRegex(RuntimeError, "No available worker can handle task job.pdf"):
+            WeightedScheduler().allocate(task(), [disabled])
+        with self.assertRaisesRegex(RuntimeError, "没有可用 Worker 能处理任务 job.pdf"):
+            WeightedScheduler().allocate(task(), [disabled], language="zh-Hans")
+
 
 class TailBalanceCoordinatorTests(TestCase):
     def test_disabled_coordinator_does_not_steal(self) -> None:
@@ -54,6 +63,15 @@ class TailBalanceCoordinatorTests(TestCase):
 
         self.assertIsNone(coordinator.try_steal_now("B", idle_elapsed_seconds=30))
         self.assertEqual(coordinator.remaining_for_worker("A"), 3)
+
+    def test_dispatch_closed_error_localizes(self) -> None:
+        item = task(copies=1)
+        workers = [worker("A")]
+        coordinator = TailBalanceCoordinator(workers, language="zh-Hans")
+        coordinator.close_dispatch()
+
+        with self.assertRaisesRegex(RuntimeError, "尾段均衡调度已关闭"):
+            coordinator.add_batch(batch(item, workers[0], copies=1))
 
     def test_does_not_steal_before_static_dispatch_closes(self) -> None:
         item = task(copies=3)

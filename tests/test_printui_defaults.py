@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
 import sys
 import tempfile
@@ -112,6 +113,68 @@ class PrintUIDefaultsTests(TestCase):
 
         ensure_defaults.assert_not_called()
         run_printui.assert_called_once()
+
+    def test_windows_only_message_defaults_to_english_and_can_localize(self) -> None:
+        with patch("printfarm.printui.sys.platform", "linux"):
+            with self.assertRaisesRegex(RuntimeError, "PrintUI is only supported on Windows"):
+                printui.open_printer_preferences("PrinterA")
+            with self.assertRaisesRegex(RuntimeError, "PrintUI 仅支持 Windows"):
+                printui.open_printer_preferences("PrinterA", language="zh-Hans")
+
+    def test_dependency_errors_can_localize_to_chinese(self) -> None:
+        real_import = builtins.__import__
+
+        def missing_import(name, *args, **kwargs):
+            if name == "pywintypes":
+                raise ModuleNotFoundError("No module named 'pywintypes'", name="pywintypes")
+            return real_import(name, *args, **kwargs)
+
+        with (
+            patch("printfarm.printui.sys.platform", "win32"),
+            patch("builtins.__import__", side_effect=missing_import),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "缺少 Windows 打印依赖: pywintypes"):
+                printui.ensure_printer_defaults_initialized("PrinterA", language="zh-Hans")
+
+        def broken_import(name, *args, **kwargs):
+            if name == "win32con":
+                raise ImportError("bad win32con")
+            return real_import(name, *args, **kwargs)
+
+        with (
+            patch("printfarm.printui.sys.platform", "win32"),
+            patch.dict(sys.modules, {"pywintypes": SimpleNamespace(), "win32print": SimpleNamespace()}),
+            patch("builtins.__import__", side_effect=broken_import),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Windows 打印依赖导入失败: bad win32con"):
+                printui.ensure_printer_defaults_initialized("PrinterA", language="zh-Hans")
+
+    def test_driver_default_devmode_error_can_localize_to_chinese(self) -> None:
+        fake_print = SimpleNamespace(DocumentProperties=lambda *args: 0)
+        fake_con = SimpleNamespace(DM_OUT_BUFFER=2, IDOK=1)
+        fake_types = SimpleNamespace(DEVMODEType=FakeDevMode)
+
+        with self.assertRaisesRegex(RuntimeError, "DocumentProperties 返回 0"):
+            printui._driver_default_devmode(
+                fake_print,
+                fake_con,
+                fake_types,
+                object(),
+                "PrinterA",
+                language="zh-Hans",
+            )
+
+    def test_incomplete_devmode_error_can_localize_to_chinese(self) -> None:
+        fake_print = SimpleNamespace(
+            OpenPrinter=lambda *args, **kwargs: object(),
+            ClosePrinter=lambda handle: None,
+            GetPrinter=lambda handle, level: {"pDevMode": None},
+            DocumentProperties=lambda *args: 1,
+        )
+
+        with patch("printfarm.printui.sys.platform", "win32"), self._install_fake_modules(fake_print):
+            with self.assertRaisesRegex(RuntimeError, "无法读取完整的打印机默认 DEVMODE"):
+                printui.ensure_printer_defaults_initialized("PrinterA", language="zh-Hans")
 
 
 class RunServicePrinterDefaultsOptionTests(TestCase):

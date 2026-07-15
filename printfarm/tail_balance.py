@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import threading
 import time
 
+from .i18n import normalize_language, translate
 from .models import WorkerConfig, WorkerTaskBatch
 
 
@@ -30,7 +31,14 @@ class _StolenBatch:
 
 
 class TailBalanceCoordinator:
-    def __init__(self, workers: list[WorkerConfig], idle_seconds: int = 15, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        workers: list[WorkerConfig],
+        idle_seconds: int = 15,
+        enabled: bool = True,
+        language: str = "en",
+    ) -> None:
+        self.language = normalize_language(language)
         self.enabled = bool(enabled)
         self.idle_seconds = max(1, int(idle_seconds))
         self._workers = {worker.name: worker for worker in workers}
@@ -50,7 +58,7 @@ class TailBalanceCoordinator:
             return
         with self._condition:
             if self._dispatch_closed:
-                raise RuntimeError("尾段均衡调度已关闭，不能继续加入任务")
+                raise RuntimeError(translate(self.language, "tail_balance.dispatch_closed"))
             self._pending.setdefault(batch.worker_name, deque()).append(batch)
             self._outstanding_batches += 1
             self._condition.notify_all()
@@ -60,9 +68,11 @@ class TailBalanceCoordinator:
             self._dispatch_closed = True
             self._condition.notify_all()
 
-    def wait_until_done(self) -> None:
+    def wait_until_done(self, stop_event: threading.Event | None = None) -> None:
         with self._condition:
             while self._outstanding_batches > 0:
+                if stop_event is not None and stop_event.is_set():
+                    return
                 self._condition.wait(0.1)
 
     def get_next(self, worker_name: str, stop_event: threading.Event) -> TailBalanceAssignment | None:
@@ -77,7 +87,10 @@ class TailBalanceCoordinator:
                 if self._dispatch_closed and self._outstanding_batches <= 0:
                     return None
 
-                if not self._dispatch_closed or stop_event.is_set():
+                if stop_event.is_set():
+                    return None
+
+                if not self._dispatch_closed:
                     self._condition.wait(0.1)
                     continue
 

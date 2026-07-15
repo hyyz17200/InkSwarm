@@ -7,6 +7,11 @@ if __name__ == "__main__":
 
         helper_index = sys.argv.index("--spooler-helper")
         sys.exit(spooler_helper_main(sys.argv[helper_index + 1:]))
+    if "--print-helper" in sys.argv:
+        from printfarm.print_helper import main as print_helper_main
+
+        helper_index = sys.argv.index("--print-helper")
+        sys.exit(print_helper_main(sys.argv[helper_index + 1:]))
     from printfarm.gui import run
 
     run()

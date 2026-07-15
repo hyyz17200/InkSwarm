@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable
 import copy
 
-from .models import RunOptions, TaskItem, WorkerConfig
+from .i18n import normalize_language
+from .models import RunOptions, TaskItem, WorkerConfig, normalize_cache_image_format, normalize_fit_mode, resolve_icc_path
 from .worker_service import validate_unique_worker_names
 
 
@@ -17,31 +19,48 @@ class PreparedRun:
 
 
 class RunService:
-    def prepare_start(self, tasks: list[TaskItem], workers: list[WorkerConfig], settings: dict[str, Any]) -> PreparedRun:
-        validate_unique_worker_names(workers)
+    def prepare_start(
+        self,
+        tasks: list[TaskItem],
+        workers: list[WorkerConfig],
+        settings: dict[str, Any],
+        icc_dir: Path | None = None,
+    ) -> PreparedRun:
+        language = normalize_language(settings.get("language", "en"))
+        validate_unique_worker_names(workers, language=language)
         active_tasks = [task for task in tasks if task.enabled]
         copied_tasks = copy.deepcopy(active_tasks)
         copied_workers = copy.deepcopy(workers)
         return PreparedRun(
             tasks=copied_tasks,
             workers=copied_workers,
-            run_options=self.build_run_options(settings),
+            run_options=self.build_run_options(settings, icc_dir=icc_dir),
             spool_total=self.spool_total(copied_tasks),
         )
 
     @staticmethod
-    def build_run_options(settings: dict[str, Any]) -> RunOptions:
+    def build_run_options(settings: dict[str, Any], icc_dir: Path | None = None) -> RunOptions:
+        fallback_value = str(settings.get("cmyk_fallback_icc", "") or "")
+        if icc_dir is not None:
+            fallback_path = resolve_icc_path(icc_dir, fallback_value)
+        else:
+            fallback_path = Path(fallback_value) if fallback_value else None
         return RunOptions(
             auto_orient_enabled=bool(settings.get("auto_orient_enabled", False)),
             target_orientation=str(settings.get("target_orientation", "portrait") or "portrait").lower(),
             ignore_margins=bool(settings.get("ignore_margins", True)),
+            fit_mode=normalize_fit_mode(settings.get("fit_mode")),
             worker_queue_limit_enabled=bool(settings.get("worker_queue_limit_enabled", False)),
             worker_queue_limit=int(settings.get("worker_queue_limit", 3) or 3),
+            queue_poll_seconds=max(1.0, float(settings.get("queue_poll_seconds", 5) or 5)),
             tail_balance_enabled=bool(settings.get("tail_balance_enabled", False)),
             tail_balance_idle_seconds=max(1, int(settings.get("tail_balance_idle_seconds", 15) or 15)),
             rip_limit_enabled=bool(settings.get("rip_limit_enabled", True)),
             rip_limit_ppi=int(settings.get("rip_limit_ppi", 300) or 300),
             printer_defaults_check_enabled=bool(settings.get("printer_defaults_check_enabled", True)),
+            cmyk_fallback_icc=str(fallback_path) if fallback_path is not None else "",
+            cache_image_format=normalize_cache_image_format(settings.get("cache_image_format")),
+            language=normalize_language(settings.get("language", "en")),
         )
 
     @staticmethod

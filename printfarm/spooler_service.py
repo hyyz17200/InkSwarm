@@ -13,6 +13,8 @@ import time
 from typing import Callable
 import uuid
 
+from .i18n import normalize_language, translate
+
 
 SC_MANAGER_CONNECT = 0x0001
 SC_STATUS_PROCESS_INFO = 0
@@ -106,13 +108,22 @@ class SHELLEXECUTEINFO(ctypes.Structure):
 
 
 class SpoolerMaintenance:
-    def __init__(self, service_name: str = "Spooler", timeout_seconds: float = 120.0) -> None:
+    def __init__(
+        self,
+        service_name: str = "Spooler",
+        timeout_seconds: float = 120.0,
+        language: str = "en",
+    ) -> None:
+        self.language = normalize_language(language)
         if sys.platform != "win32":
-            raise SpoolerMaintenanceError("重启打印队列仅支持 Windows。")
+            raise SpoolerMaintenanceError(self._t("spooler_maintenance.windows_only"))
         self.service_name = service_name
         self.timeout_seconds = timeout_seconds
         self._advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
         self._configure_api()
+
+    def _t(self, key: str, **kwargs: object) -> str:
+        return translate(self.language, key, **kwargs)
 
     @staticmethod
     def is_process_elevated() -> bool:
@@ -125,7 +136,7 @@ class SpoolerMaintenance:
 
     def restart(self, log: Callable[[str], None] | None = None) -> SpoolerMaintenanceResult:
         if not self.is_process_elevated():
-            raise SpoolerMaintenanceError("当前进程没有管理员权限，无法停止/启动 Windows Print Spooler。请以管理员身份启动 InkSwarm 后重试。")
+            raise SpoolerMaintenanceError(self._t("spooler_maintenance.admin_required"))
 
         steps: list[str] = []
 
@@ -135,18 +146,19 @@ class SpoolerMaintenance:
                 log(message)
 
         before_status = self.query_status()
-        record(f"当前 Windows Print Spooler 状态: {self._format_status(before_status)}。")
-        record("准备停止 Windows Print Spooler 服务。")
+        record(self._t("spooler_maintenance.current_status", status=self._format_status(before_status)))
+        record(self._t("spooler_maintenance.prepare_stop"))
         stopped_status = self.stop(log=record)
-
-        record("准备启动 Windows Print Spooler 服务。")
-        started_status = self.start(log=record)
         if stopped_status.process_id:
-            raise SpoolerMaintenanceError(f"Print Spooler 停止确认异常，停止后 PID 仍为 {stopped_status.process_id}。")
+            raise SpoolerMaintenanceError(
+                self._t("spooler_maintenance.stop_pid_still_present", pid=stopped_status.process_id)
+            )
+
+        record(self._t("spooler_maintenance.prepare_start"))
+        started_status = self.start(log=record)
         if before_status.process_id and started_status.process_id == before_status.process_id:
             raise SpoolerMaintenanceError(
-                f"Print Spooler 状态回到运行中，但进程 PID 没有变化，仍为 {started_status.process_id}，"
-                "无法确认服务已经真实重启。"
+                self._t("spooler_maintenance.pid_unchanged", pid=started_status.process_id)
             )
         return SpoolerMaintenanceResult(steps=steps)
 
@@ -154,26 +166,26 @@ class SpoolerMaintenance:
         with self._open_service(SERVICE_QUERY_STATUS | SERVICE_STOP) as service:
             status = self._query_status(service)
             if status.state == SERVICE_STOPPED:
-                self._log(log, "Windows Print Spooler 已经处于停止状态。")
+                self._log(log, self._t("spooler_maintenance.already_stopped"))
                 return status
-            self._log(log, f"停止前状态: {self._format_status(status)}。")
+            self._log(log, self._t("spooler_maintenance.before_stop_status", status=self._format_status(status)))
             if not self._advapi32.ControlService(service, SERVICE_CONTROL_STOP, ctypes.byref(SERVICE_STATUS())):
                 error = ctypes.get_last_error()
                 if error != ERROR_SERVICE_NOT_ACTIVE:
-                    self._raise_last_error("停止 Windows Print Spooler")
-            return self._wait_for_state(service, SERVICE_STOPPED, "停止", log)
+                    self._raise_last_error(self._t("spooler_maintenance.action.stop"))
+            return self._wait_for_state(service, SERVICE_STOPPED, self._t("spooler_maintenance.action.stop"), log)
 
     def start(self, log: Callable[[str], None] | None = None) -> SpoolerServiceStatus:
         with self._open_service(SERVICE_QUERY_STATUS | SERVICE_START) as service:
             status = self._query_status(service)
             if status.state == SERVICE_RUNNING:
-                self._log(log, "Windows Print Spooler 已经处于运行状态。")
+                self._log(log, self._t("spooler_maintenance.already_running"))
                 return status
             if not self._advapi32.StartServiceW(service, 0, None):
                 error = ctypes.get_last_error()
                 if error != ERROR_SERVICE_ALREADY_RUNNING:
-                    self._raise_last_error("启动 Windows Print Spooler")
-            return self._wait_for_state(service, SERVICE_RUNNING, "启动", log)
+                    self._raise_last_error(self._t("spooler_maintenance.action.start"))
+            return self._wait_for_state(service, SERVICE_RUNNING, self._t("spooler_maintenance.action.start"), log)
 
     def query_state(self) -> int:
         return self.query_status().state
@@ -209,11 +221,11 @@ class SpoolerMaintenance:
             def __enter__(self):
                 self.scm = maintenance._advapi32.OpenSCManagerW(None, None, SC_MANAGER_CONNECT)
                 if not self.scm:
-                    maintenance._raise_last_error("打开服务控制管理器")
+                    maintenance._raise_last_error(maintenance._t("spooler_maintenance.open_scm"))
                 self.service = maintenance._advapi32.OpenServiceW(self.scm, maintenance.service_name, access)
                 if not self.service:
                     maintenance._advapi32.CloseServiceHandle(self.scm)
-                    maintenance._raise_last_error("打开 Windows Print Spooler 服务")
+                    maintenance._raise_last_error(maintenance._t("spooler_maintenance.open_service"))
                 return self.service
 
             def __exit__(self, exc_type, exc, tb):
@@ -238,7 +250,7 @@ class SpoolerMaintenance:
             ctypes.sizeof(status),
             ctypes.byref(needed),
         ):
-            self._raise_last_error("查询 Windows Print Spooler 状态")
+            self._raise_last_error(self._t("spooler_maintenance.query_status"))
         return SpoolerServiceStatus(
             state=int(status.dwCurrentState),
             process_id=int(status.dwProcessId),
@@ -254,15 +266,17 @@ class SpoolerMaintenance:
             status = self._query_status(service)
             status_text = self._format_status(status)
             if status.state == target_state:
-                self._log(log, f"Windows Print Spooler 已确认{action_label}完成: {status_text}。")
+                self._log(log, self._t("spooler_maintenance.confirmed", action=action_label, status=status_text))
                 return status
             now = time.monotonic()
             if status_text != last_status_text or now - last_log_time >= 5.0:
-                self._log(log, f"等待 Windows Print Spooler {action_label}中: {status_text}。")
+                self._log(log, self._t("spooler_maintenance.waiting", action=action_label, status=status_text))
                 last_status_text = status_text
                 last_log_time = now
             if now >= deadline:
-                raise SpoolerMaintenanceError(f"等待 Windows Print Spooler {action_label}超时，当前状态: {status_text}")
+                raise SpoolerMaintenanceError(
+                    self._t("spooler_maintenance.timeout", action=action_label, status=status_text)
+                )
             time.sleep(0.25)
 
     @staticmethod
@@ -270,21 +284,21 @@ class SpoolerMaintenance:
         if log is not None:
             log(message)
 
-    @staticmethod
-    def _raise_last_error(action: str) -> None:
+    def _raise_last_error(self, action: str) -> None:
         error = ctypes.get_last_error()
         message = ctypes.FormatError(error).strip()
-        raise SpoolerMaintenanceError(f"{action}失败: {message} (WinError {error})")
+        raise SpoolerMaintenanceError(
+            self._t("spooler_maintenance.action_failed", action=action, message=message, error=error)
+        )
 
-    @staticmethod
-    def _format_status(status: SpoolerServiceStatus) -> str:
+    def _format_status(self, status: SpoolerServiceStatus) -> str:
         names = {
             SERVICE_STOPPED: "STOPPED",
             SERVICE_START_PENDING: "START_PENDING",
             SERVICE_STOP_PENDING: "STOP_PENDING",
             SERVICE_RUNNING: "RUNNING",
         }
-        name = names.get(status.state, f"状态码 {status.state}")
+        name = names.get(status.state, self._t("spooler_maintenance.status_code", state=status.state))
         return (
             f"{name} / PID {status.process_id} / "
             f"checkpoint {status.checkpoint} / wait_hint {status.wait_hint_ms}ms"
@@ -294,41 +308,53 @@ class SpoolerMaintenance:
 def run_elevated_spooler_maintenance(
     timeout_seconds: float = 120.0,
     log: Callable[[str], None] | None = None,
+    language: str = "en",
 ) -> SpoolerMaintenanceResult:
+    language = normalize_language(language)
     if sys.platform != "win32":
-        raise SpoolerMaintenanceError("重启打印队列仅支持 Windows。")
+        raise SpoolerMaintenanceError(translate(language, "spooler_maintenance.windows_only"))
 
     token = uuid.uuid4().hex
     temp_dir = Path(tempfile.gettempdir())
     result_file = temp_dir / f"inkswarm-spooler-maintenance-{token}.json"
     events_file = temp_dir / f"inkswarm-spooler-maintenance-{token}.events.jsonl"
-    file_path, parameters, working_dir = _elevated_helper_command(result_file, events_file, timeout_seconds)
-    process_handle = _shell_execute_runas(file_path, parameters, working_dir)
-
     try:
-        exit_code = _wait_for_helper(process_handle, events_file, timeout_seconds + 90.0, log)
-    finally:
-        ctypes.windll.kernel32.CloseHandle(process_handle)
+        file_path, parameters, working_dir = _elevated_helper_command(result_file, events_file, timeout_seconds, language)
+        process_handle = _shell_execute_runas(file_path, parameters, working_dir, language)
+        try:
+            exit_code = _wait_for_helper(process_handle, events_file, timeout_seconds + 90.0, log, language)
+        finally:
+            ctypes.windll.kernel32.CloseHandle(process_handle)
 
-    if not result_file.exists():
-        raise SpoolerMaintenanceError(f"管理员维护进程没有写回结果，退出码: {exit_code}")
+        if not result_file.exists():
+            raise SpoolerMaintenanceError(
+                translate(language, "spooler_maintenance.helper_missing_result", exit_code=exit_code)
+            )
 
-    try:
-        data = json.loads(result_file.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise SpoolerMaintenanceError(f"读取管理员维护结果失败: {exc}") from exc
+        try:
+            data = json.loads(result_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise SpoolerMaintenanceError(
+                translate(language, "spooler_maintenance.helper_result_read_failed", error=exc)
+            ) from exc
+
+        steps = [str(item) for item in data.get("steps", [])]
+        if not data.get("ok"):
+            error = str(data.get("error") or translate(language, "spooler_maintenance.helper_failed"))
+            raise SpoolerMaintenanceError(error)
+        return SpoolerMaintenanceResult(steps=steps)
     finally:
         _cleanup_temp_file(result_file)
         _cleanup_temp_file(events_file)
 
-    steps = [str(item) for item in data.get("steps", [])]
-    if not data.get("ok"):
-        error = str(data.get("error") or "管理员维护进程执行失败。")
-        raise SpoolerMaintenanceError(error)
-    return SpoolerMaintenanceResult(steps=steps)
 
-
-def run_spooler_maintenance_helper(result_file: Path, events_file: Path, timeout_seconds: float) -> int:
+def run_spooler_maintenance_helper(
+    result_file: Path,
+    events_file: Path,
+    timeout_seconds: float,
+    language: str = "en",
+) -> int:
+    language = normalize_language(language)
     steps: list[str] = []
 
     def record(message: str) -> None:
@@ -337,7 +363,7 @@ def run_spooler_maintenance_helper(result_file: Path, events_file: Path, timeout
 
     payload: dict[str, object]
     try:
-        result = SpoolerMaintenance(timeout_seconds=timeout_seconds).restart(log=record)
+        result = SpoolerMaintenance(timeout_seconds=timeout_seconds, language=language).restart(log=record)
         payload = {
             "ok": True,
             "steps": steps,
@@ -355,7 +381,13 @@ def run_spooler_maintenance_helper(result_file: Path, events_file: Path, timeout
     return exit_code
 
 
-def _elevated_helper_command(result_file: Path, events_file: Path, timeout_seconds: float) -> tuple[str, str, str]:
+def _elevated_helper_command(
+    result_file: Path,
+    events_file: Path,
+    timeout_seconds: float,
+    language: str = "en",
+) -> tuple[str, str, str]:
+    language = normalize_language(language)
     app_path = _current_app_path()
     helper_args = [
         "--spooler-helper",
@@ -365,6 +397,8 @@ def _elevated_helper_command(result_file: Path, events_file: Path, timeout_secon
         str(events_file),
         "--timeout",
         str(float(timeout_seconds)),
+        "--language",
+        language,
     ]
     if app_path.suffix.lower() in {".py", ".pyw"}:
         file_path = sys.executable
@@ -385,7 +419,8 @@ def _current_app_path() -> Path:
     return Path(sys.executable).resolve()
 
 
-def _shell_execute_runas(file_path: str, parameters: str, working_dir: str) -> int:
+def _shell_execute_runas(file_path: str, parameters: str, working_dir: str, language: str = "en") -> int:
+    language = normalize_language(language)
     shell32 = ctypes.WinDLL("shell32", use_last_error=True)
     shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(SHELLEXECUTEINFO)]
     shell32.ShellExecuteExW.restype = wintypes.BOOL
@@ -402,9 +437,11 @@ def _shell_execute_runas(file_path: str, parameters: str, working_dir: str) -> i
     if not shell32.ShellExecuteExW(ctypes.byref(info)):
         error = ctypes.get_last_error()
         if error == ERROR_CANCELLED:
-            raise SpoolerMaintenanceCancelled("用户取消了管理员权限授权，未执行 Print Spooler 操作。")
+            raise SpoolerMaintenanceCancelled(translate(language, "spooler_maintenance.admin_cancelled"))
         message = ctypes.FormatError(error).strip()
-        raise SpoolerMaintenanceError(f"启动管理员维护进程失败: {message} (WinError {error})")
+        raise SpoolerMaintenanceError(
+            translate(language, "spooler_maintenance.start_elevated_failed", message=message, error=error)
+        )
     return int(info.hProcess)
 
 
@@ -413,7 +450,9 @@ def _wait_for_helper(
     events_file: Path,
     timeout_seconds: float,
     log: Callable[[str], None] | None,
+    language: str = "en",
 ) -> int:
+    language = normalize_language(language)
     kernel32 = ctypes.windll.kernel32
     deadline = time.monotonic() + max(1.0, timeout_seconds)
     offset = 0
@@ -428,9 +467,11 @@ def _wait_for_helper(
                 return -1
             return int(exit_code.value)
         if result != WAIT_TIMEOUT:
-            raise SpoolerMaintenanceError(f"等待管理员维护进程失败，WaitForSingleObject={result}")
+            raise SpoolerMaintenanceError(
+                translate(language, "spooler_maintenance.wait_helper_failed", result=result)
+            )
         if time.monotonic() >= deadline:
-            raise SpoolerMaintenanceError("等待管理员维护进程完成超时，Print Spooler 状态可能需要手动确认。")
+            raise SpoolerMaintenanceError(translate(language, "spooler_maintenance.helper_timeout"))
 
 
 def _drain_event_file(events_file: Path, offset: int, log: Callable[[str], None] | None) -> int:

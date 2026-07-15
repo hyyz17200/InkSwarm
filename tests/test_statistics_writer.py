@@ -7,7 +7,13 @@ import csv
 import tempfile
 import time
 
-from printfarm.statistics_writer import CSV_HEADER, LEGACY_CSV_HEADER, StatisticsTaskRecord, MonthlyStatisticsWriter
+from printfarm.statistics_writer import (
+    CHINESE_CSV_HEADER,
+    CSV_HEADER,
+    LEGACY_CSV_HEADER,
+    StatisticsTaskRecord,
+    MonthlyStatisticsWriter,
+)
 
 
 def ts(year: int, month: int, day: int, hour: int = 10, minute: int = 0, second: int = 0) -> float:
@@ -42,13 +48,13 @@ class MonthlyStatisticsWriterTests(TestCase):
             self.assertFalse(any((root / "pending_runs").glob("*.json")))
             rows = read_dict_rows(root)
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["任务启动时刻"], fmt(task_started_at))
-            self.assertEqual(rows[0]["最后成功时刻"], fmt(last_success_at))
-            self.assertEqual(rows[0]["文件名"], "job.pdf")
-            self.assertEqual(rows[0]["请求张数"], "9")
-            self.assertEqual(rows[0]["成功张数"], "6")
-            self.assertEqual(rows[0]["未完成张数"], "3")
-            self.assertEqual(rows[0]["完成状态"], "未完成")
+            self.assertEqual(rows[0]["Task Started At"], fmt(task_started_at))
+            self.assertEqual(rows[0]["Last Success At"], fmt(last_success_at))
+            self.assertEqual(rows[0]["File Name"], "job.pdf")
+            self.assertEqual(rows[0]["Requested Copies"], "9")
+            self.assertEqual(rows[0]["Successful Copies"], "6")
+            self.assertEqual(rows[0]["Unfinished Copies"], "3")
+            self.assertEqual(rows[0]["Completion Status"], "Incomplete")
 
     def test_unfinalized_pending_run_recovers_after_restart(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -65,11 +71,11 @@ class MonthlyStatisticsWriterTests(TestCase):
             self.assertFalse(any((root / "pending_runs").glob("*.json")))
             rows = read_dict_rows(root)
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["文件名"], "crash.pdf")
-            self.assertEqual(rows[0]["请求张数"], "5")
-            self.assertEqual(rows[0]["成功张数"], "2")
-            self.assertEqual(rows[0]["未完成张数"], "3")
-            self.assertEqual(rows[0]["完成状态"], "未完成")
+            self.assertEqual(rows[0]["File Name"], "crash.pdf")
+            self.assertEqual(rows[0]["Requested Copies"], "5")
+            self.assertEqual(rows[0]["Successful Copies"], "2")
+            self.assertEqual(rows[0]["Unfinished Copies"], "3")
+            self.assertEqual(rows[0]["Completion Status"], "Incomplete")
 
     def test_locked_csv_keeps_pending_and_later_upserts_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -94,9 +100,9 @@ class MonthlyStatisticsWriterTests(TestCase):
             self.assertTrue(retry_again.ok)
             rows = read_dict_rows(root)
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["运行ID"], "run-locked")
-            self.assertEqual(rows[0]["任务ID"], "task-a")
-            self.assertEqual(rows[0]["成功张数"], "4")
+            self.assertEqual(rows[0]["Run ID"], "run-locked")
+            self.assertEqual(rows[0]["Task ID"], "task-a")
+            self.assertEqual(rows[0]["Successful Copies"], "4")
 
     def test_cross_month_task_is_written_to_task_start_month(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -208,12 +214,12 @@ class MonthlyStatisticsWriterTests(TestCase):
 
             rows = read_dict_rows(root)
             self.assertEqual(len(rows), 2)
-            self.assertEqual(rows[0]["文件名"], "legacy.pdf")
-            self.assertEqual(rows[0]["请求张数"], "7")
-            self.assertEqual(rows[0]["成功张数"], "7")
-            self.assertEqual(rows[0]["运行ID"], "legacy-000001")
-            self.assertEqual(rows[1]["文件名"], "new.pdf")
-            self.assertEqual(rows[1]["成功张数"], "2")
+            self.assertEqual(rows[0]["File Name"], "legacy.pdf")
+            self.assertEqual(rows[0]["Requested Copies"], "7")
+            self.assertEqual(rows[0]["Successful Copies"], "7")
+            self.assertEqual(rows[0]["Run ID"], "legacy-000001")
+            self.assertEqual(rows[1]["File Name"], "new.pdf")
+            self.assertEqual(rows[1]["Successful Copies"], "2")
 
     def test_read_monthly_report_normalizes_legacy_csv_without_rewriting(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -240,6 +246,65 @@ class MonthlyStatisticsWriterTests(TestCase):
                 raw_rows = list(csv.reader(fh))
             self.assertEqual(raw_rows[0], LEGACY_CSV_HEADER)
 
+    def test_chinese_full_csv_is_normalized_to_english_schema_when_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            csv_path = root / "2026-05.csv"
+            with csv_path.open("w", encoding="utf-8-sig", newline="") as fh:
+                writer_csv = csv.writer(fh)
+                writer_csv.writerow(CHINESE_CSV_HEADER)
+                writer_csv.writerow([
+                    "2026-05-01 09:00:00",
+                    "2026-05-01 09:10:00",
+                    "legacy-full.pdf",
+                    "8",
+                    "6",
+                    "2",
+                    "未完成",
+                    "run-cn",
+                    "task-cn",
+                ])
+
+            writer = MonthlyStatisticsWriter(root)
+            report = writer.read_monthly_report("2026-05")
+
+            self.assertEqual(report.header, tuple(CSV_HEADER))
+            self.assertEqual(len(report.rows), 1)
+            self.assertEqual(report.rows[0][2], "legacy-full.pdf")
+            self.assertEqual(report.rows[0][4], "6")
+            self.assertEqual(report.rows[0][6], "Incomplete")
+
+    def test_chinese_full_csv_is_rewritten_with_english_header_on_upsert(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            csv_path = root / "2026-05.csv"
+            with csv_path.open("w", encoding="utf-8-sig", newline="") as fh:
+                writer_csv = csv.writer(fh)
+                writer_csv.writerow(CHINESE_CSV_HEADER)
+                writer_csv.writerow([
+                    "2026-05-01 09:00:00",
+                    "2026-05-01 09:10:00",
+                    "legacy-full.pdf",
+                    "8",
+                    "8",
+                    "0",
+                    "完成",
+                    "run-cn",
+                    "task-cn",
+                ])
+
+            writer = MonthlyStatisticsWriter(root)
+            started_at = ts(2026, 5, 6)
+            writer.begin_run("run-new", started_at, [StatisticsTaskRecord("task-new", "new.pdf", 1)])
+            writer.record_success("run-new", "task-new", "new.pdf", 1, copies_done=1, success_at_ts=started_at + 20)
+            result = writer.finish_run("run-new", started_at + 30)
+
+            self.assertTrue(result.ok)
+            with csv_path.open("r", encoding="utf-8-sig", newline="") as fh:
+                raw_rows = list(csv.reader(fh))
+            self.assertEqual(raw_rows[0], CSV_HEADER)
+            self.assertEqual(raw_rows[1][6], "Complete")
+
     def test_read_daily_report_filters_current_month_rows_by_start_date(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -254,7 +319,7 @@ class MonthlyStatisticsWriterTests(TestCase):
                     "3",
                     "3",
                     "0",
-                    "完成",
+                    "Complete",
                     "run-today",
                     "task-today",
                 ])
@@ -265,7 +330,7 @@ class MonthlyStatisticsWriterTests(TestCase):
                     "2",
                     "2",
                     "0",
-                    "完成",
+                    "Complete",
                     "run-other-day",
                     "task-other-day",
                 ])
