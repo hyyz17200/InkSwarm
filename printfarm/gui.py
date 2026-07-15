@@ -1627,8 +1627,29 @@ class MainWindow(QMainWindow):
         return wrapper
 
     def reload_workers(self) -> None:
-        self.workers = self.worker_service.load_workers(self.current_worker_group)
         self.worker_config_error = None
+        try:
+            self.workers = self.worker_service.load_workers(self.current_worker_group)
+        except Exception as exc:
+            self.workers = []
+            self.worker_config_error = str(exc)
+            self.on_log_text(self.t("log.worker_load_failed", error=exc))
+            QMessageBox.critical(
+                self,
+                self.t("message.worker_load_failed"),
+                self.t("message.worker_load_failed_detail", error=exc),
+            )
+        else:
+            load_errors = self.worker_service.last_load_errors
+            for path, error in load_errors:
+                self.on_log_text(self.t("log.worker_config_skipped", path=path, error=error))
+            if load_errors:
+                details = "\n".join(f"{path}: {error}" for path, error in load_errors)
+                QMessageBox.warning(
+                    self,
+                    self.t("message.worker_load_warning"),
+                    self.t("message.worker_load_warning_detail", details=details),
+                )
         self.worker_table.setRowCount(len(self.workers))
         self.worker_row_by_name.clear()
         for row, worker in enumerate(self.workers):

@@ -19,6 +19,7 @@ class ConfigStore:
             settings_file=(root / "app_settings.json").resolve(),
             icc_dir=(root / "icc").resolve(),
         )
+        self.last_worker_load_errors: list[tuple[Path, str]] = []
         self.paths.cache_dir.mkdir(parents=True, exist_ok=True)
         self.paths.logs_dir.mkdir(parents=True, exist_ok=True)
         self.paths.statistics_dir.mkdir(parents=True, exist_ok=True)
@@ -102,12 +103,17 @@ class ConfigStore:
         presets_dir.mkdir(parents=True, exist_ok=True)
         presets: dict[str, PresetConfig] = {}
         for preset_file in sorted(presets_dir.glob("*.json")):
-            preset_raw = json.loads(preset_file.read_text(encoding="utf-8"))
-            preset = PresetConfig.from_dict(preset_raw, file_path=preset_file)
+            try:
+                preset_raw = json.loads(preset_file.read_text(encoding="utf-8"))
+                preset = PresetConfig.from_dict(preset_raw, file_path=preset_file)
+            except Exception as exc:
+                self.last_worker_load_errors.append((preset_file, str(exc)))
+                continue
             presets[preset.name] = preset
         return presets
 
     def load_workers(self, group_name: str | None = None) -> list[WorkerConfig]:
+        self.last_worker_load_errors = []
         group_dir = self.worker_group_dir(group_name)
         group_dir.mkdir(parents=True, exist_ok=True)
         workers: list[WorkerConfig] = []
@@ -116,9 +122,14 @@ class ConfigStore:
             worker_file = directory / "worker.json"
             if not worker_file.exists():
                 continue
-            raw = json.loads(worker_file.read_text(encoding="utf-8"))
-            presets = self._load_presets_for_worker(directory)
-            workers.append(WorkerConfig.from_dict(raw, directory=directory, presets=presets))
+            try:
+                raw = json.loads(worker_file.read_text(encoding="utf-8"))
+                presets = self._load_presets_for_worker(directory)
+                worker = WorkerConfig.from_dict(raw, directory=directory, presets=presets)
+            except Exception as exc:
+                self.last_worker_load_errors.append((worker_file, str(exc)))
+                continue
+            workers.append(worker)
 
         if not workers and not self._worker_config_exists_anywhere():
             self.ensure_sample_worker(group_dir)

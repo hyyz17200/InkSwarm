@@ -64,3 +64,33 @@ class SaveWorkerPresetSafetyTests(TestCase):
 
             saved = json.loads((worker_dir / "presets" / "default.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["dpi"], 720)
+
+
+class DefensiveWorkerLoadingTests(TestCase):
+    def test_invalid_worker_is_skipped_without_hiding_valid_workers(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = ConfigStore(Path(tmp))
+            _write_worker(store.default_group_dir() / "Good")
+            broken_file = store.default_group_dir() / "Broken" / "worker.json"
+            broken_file.parent.mkdir(parents=True)
+            broken_file.write_text('{"weight": "not-a-number"}', encoding="utf-8")
+
+            workers = store.load_workers()
+
+            self.assertEqual([worker.name for worker in workers], ["Good"])
+            self.assertEqual(store.last_worker_load_errors[0][0], broken_file)
+            self.assertIn("invalid literal", store.last_worker_load_errors[0][1])
+
+    def test_invalid_preset_is_skipped_without_hiding_worker(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = ConfigStore(Path(tmp))
+            worker_dir = store.default_group_dir() / "W1"
+            _write_worker(worker_dir)
+            broken_preset = worker_dir / "presets" / "broken.json"
+            broken_preset.write_text('{"dpi": }', encoding="utf-8")
+
+            workers = store.load_workers()
+
+            self.assertEqual(len(workers), 1)
+            self.assertEqual(list(workers[0].presets), ["default"])
+            self.assertEqual(store.last_worker_load_errors[0][0], broken_preset)

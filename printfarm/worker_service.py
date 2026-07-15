@@ -57,6 +57,10 @@ class WorkerService:
     def load_workers(self, group_name: str | None = None) -> list[WorkerConfig]:
         return self.store.load_workers(group_name)
 
+    @property
+    def last_load_errors(self) -> tuple[tuple[Path, str], ...]:
+        return tuple(self.store.last_worker_load_errors)
+
     def save_workers(self, workers: Iterable[WorkerConfig]) -> None:
         self.store.save_workers(workers)
 
