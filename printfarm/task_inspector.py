@@ -10,6 +10,7 @@ from PIL import Image, ImageCms, ImageOps
 
 from .i18n import normalize_language, translate
 from .models import DEFAULT_RASTER_DPI
+from .pdfium_lock import PDFIUM_LOCK
 
 Image.MAX_IMAGE_PIXELS = None
 # Do NOT enable ImageFile.LOAD_TRUNCATED_IMAGES: incomplete or corrupt bitmaps must
@@ -50,28 +51,30 @@ def _cmyk_fallback_available(cmyk_fallback_icc: Path | None) -> bool:
 def _inspect_pdf(file_path: Path, preview_max_size: tuple[int, int], language: str) -> TaskInspection:
     document: pdfium.PdfDocument | None = None
     try:
-        document = pdfium.PdfDocument(str(file_path))
-        if len(document) == 0:
-            raise TaskInspectionError(translate(language, "task_inspector.empty_pdf"))
-        first_page = document[0]
-        width_pt = float(first_page.get_width())
-        height_pt = float(first_page.get_height())
-        width_mm = width_pt * MM_PER_INCH / PDF_POINTS_PER_INCH
-        height_mm = height_pt * MM_PER_INCH / PDF_POINTS_PER_INCH
-        display = _format_mm(width_mm, height_mm, len(document))
-        preview_scale = min(preview_max_size) / max(width_pt, height_pt)
-        # pypdfium2 accepts a float scale, but Pylance infers int from the default value.
-        bitmap = first_page.render(scale=cast(Any, preview_scale), optimize_mode="lcd")
-        image = bitmap.to_pil().convert("RGB")
-        preview = _image_to_png_bytes(image, preview_max_size)
-        return TaskInspection(display_size_mm=display, preview_bytes=preview, page_count=len(document))
+        with PDFIUM_LOCK:
+            try:
+                document = pdfium.PdfDocument(str(file_path))
+                if len(document) == 0:
+                    raise TaskInspectionError(translate(language, "task_inspector.empty_pdf"))
+                first_page = document[0]
+                width_pt = float(first_page.get_width())
+                height_pt = float(first_page.get_height())
+                width_mm = width_pt * MM_PER_INCH / PDF_POINTS_PER_INCH
+                height_mm = height_pt * MM_PER_INCH / PDF_POINTS_PER_INCH
+                display = _format_mm(width_mm, height_mm, len(document))
+                preview_scale = min(preview_max_size) / max(width_pt, height_pt)
+                # pypdfium2 accepts a float scale, but Pylance infers int from the default value.
+                bitmap = first_page.render(scale=cast(Any, preview_scale), optimize_mode="lcd")
+                image = bitmap.to_pil().convert("RGB")
+                preview = _image_to_png_bytes(image, preview_max_size)
+                return TaskInspection(display_size_mm=display, preview_bytes=preview, page_count=len(document))
+            finally:
+                if document is not None:
+                    document.close()
     except TaskInspectionError:
         raise
     except Exception as exc:
         raise TaskInspectionError(str(exc)) from exc
-    finally:
-        if document is not None:
-            document.close()
 
 
 def _inspect_image(

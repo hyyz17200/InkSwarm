@@ -26,6 +26,7 @@ from .models import (
     normalize_cache_image_format,
     stable_hash,
 )
+from .pdfium_lock import PDFIUM_LOCK
 from .debug_logger import debug_exception, debug_log
 from .task_inspector import MM_PER_INCH, PDF_POINTS_PER_INCH, apply_exif_orientation, get_image_dpi
 
@@ -113,8 +114,9 @@ class Renderer:
         # is not rendered by two workers at once); _render_key_locks holds one lock
         # per cache key (so identically configured workers that share a cache
         # directory render/write it once while the others wait and then read it).
-        self._pdf_render_locks: dict[str, threading.Lock] = {}
-        self._pdf_render_locks_guard = threading.Lock()
+        # PDFium calls themselves use the process-wide PDFIUM_LOCK shared with
+        # task inspection; the native library is not thread-safe even when two
+        # threads are working on different source files.
         self._render_key_locks: dict[str, threading.Lock] = {}
         self._render_key_locks_guard = threading.Lock()
 
@@ -261,8 +263,7 @@ class Renderer:
         page_info: list[PageRenderInfo] = []
         effective_dpi = self._effective_rip_dpi(preset.dpi)
         scale = effective_dpi / PDF_POINTS_PER_INCH
-        lock = self._get_pdf_render_lock(pdf_path)
-        with lock:
+        with PDFIUM_LOCK:
             document = pdfium.PdfDocument(str(pdf_path))
             try:
                 for index in range(len(document)):
@@ -325,15 +326,6 @@ class Renderer:
         max_w = max(1, round(width_mm / MM_PER_INCH * self.rip_limit_ppi))
         max_h = max(1, round(height_mm / MM_PER_INCH * self.rip_limit_ppi))
         return max_w, max_h
-
-    def _get_pdf_render_lock(self, pdf_path: Path) -> threading.Lock:
-        key = str(pdf_path.resolve()).lower()
-        with self._pdf_render_locks_guard:
-            lock = self._pdf_render_locks.get(key)
-            if lock is None:
-                lock = threading.Lock()
-                self._pdf_render_locks[key] = lock
-            return lock
 
     def _load_pdf_page_with_retry(self, document: pdfium.PdfDocument, index: int, pdf_path: Path, worker: WorkerConfig):
         attempts = 3
