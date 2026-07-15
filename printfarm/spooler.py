@@ -248,8 +248,8 @@ class PrinterSpooler:
             f"ignore_margins={ignore_margins} predecoded={prepared is not None}"
         )
         dc = win32ui.CreateDC()
-        dc.CreatePrinterDC(printer_name)
         try:
+            dc.CreatePrinterDC(printer_name)
             job_id = dc.StartDoc(job_name)
             if on_job_started is not None and isinstance(job_id, int) and job_id > 0:
                 on_job_started(job_id)
@@ -277,7 +277,10 @@ class PrinterSpooler:
                 pass
             raise
         finally:
-            dc.DeleteDC()
+            try:
+                dc.DeleteDC()
+            except Exception:
+                pass
         debug_log(f"spooler print end printer={printer_name} job={job_name}")
 
     def _compute_draw_rect(self, dc, page_spec: dict, ignore_margins: bool = True, fit_mode: str = DEFAULT_FIT_MODE) -> tuple[int, int, int, int]:
