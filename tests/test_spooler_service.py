@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from printfarm.spooler_service import (
     SERVICE_RUNNING,
@@ -54,3 +54,33 @@ class SpoolerRestartTests(TestCase):
             maintenance.restart()
 
         self.assertEqual(start_calls, [])
+
+
+class ElevatedMaintenanceCleanupTests(TestCase):
+    def test_temp_files_are_cleaned_when_helper_wait_fails(self) -> None:
+        cleaned: list[Path] = []
+        close_handle = Mock()
+        with patch("printfarm.spooler_service._shell_execute_runas", return_value=123), patch(
+            "printfarm.spooler_service._wait_for_helper", side_effect=SpoolerMaintenanceError("wait failed")
+        ), patch("printfarm.spooler_service._cleanup_temp_file", side_effect=cleaned.append), patch(
+            "printfarm.spooler_service.ctypes.windll.kernel32.CloseHandle", close_handle
+        ):
+            with self.assertRaisesRegex(SpoolerMaintenanceError, "wait failed"):
+                run_elevated_spooler_maintenance()
+
+        self.assertEqual(len(cleaned), 2)
+        self.assertTrue(str(cleaned[0]).endswith(".json"))
+        self.assertTrue(str(cleaned[1]).endswith(".events.jsonl"))
+        close_handle.assert_called_once_with(123)
+
+    def test_temp_files_are_cleaned_when_helper_result_is_missing(self) -> None:
+        cleaned: list[Path] = []
+        with patch("printfarm.spooler_service._shell_execute_runas", return_value=123), patch(
+            "printfarm.spooler_service._wait_for_helper", return_value=2
+        ), patch("printfarm.spooler_service._cleanup_temp_file", side_effect=cleaned.append), patch(
+            "printfarm.spooler_service.ctypes.windll.kernel32.CloseHandle"
+        ):
+            with self.assertRaisesRegex(SpoolerMaintenanceError, "did not write a result"):
+                run_elevated_spooler_maintenance()
+
+        self.assertEqual(len(cleaned), 2)

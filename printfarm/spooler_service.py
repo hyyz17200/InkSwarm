@@ -318,34 +318,34 @@ def run_elevated_spooler_maintenance(
     temp_dir = Path(tempfile.gettempdir())
     result_file = temp_dir / f"inkswarm-spooler-maintenance-{token}.json"
     events_file = temp_dir / f"inkswarm-spooler-maintenance-{token}.events.jsonl"
-    file_path, parameters, working_dir = _elevated_helper_command(result_file, events_file, timeout_seconds, language)
-    process_handle = _shell_execute_runas(file_path, parameters, working_dir, language)
-
     try:
-        exit_code = _wait_for_helper(process_handle, events_file, timeout_seconds + 90.0, log, language)
-    finally:
-        ctypes.windll.kernel32.CloseHandle(process_handle)
+        file_path, parameters, working_dir = _elevated_helper_command(result_file, events_file, timeout_seconds, language)
+        process_handle = _shell_execute_runas(file_path, parameters, working_dir, language)
+        try:
+            exit_code = _wait_for_helper(process_handle, events_file, timeout_seconds + 90.0, log, language)
+        finally:
+            ctypes.windll.kernel32.CloseHandle(process_handle)
 
-    if not result_file.exists():
-        raise SpoolerMaintenanceError(
-            translate(language, "spooler_maintenance.helper_missing_result", exit_code=exit_code)
-        )
+        if not result_file.exists():
+            raise SpoolerMaintenanceError(
+                translate(language, "spooler_maintenance.helper_missing_result", exit_code=exit_code)
+            )
 
-    try:
-        data = json.loads(result_file.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise SpoolerMaintenanceError(
-            translate(language, "spooler_maintenance.helper_result_read_failed", error=exc)
-        ) from exc
+        try:
+            data = json.loads(result_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise SpoolerMaintenanceError(
+                translate(language, "spooler_maintenance.helper_result_read_failed", error=exc)
+            ) from exc
+
+        steps = [str(item) for item in data.get("steps", [])]
+        if not data.get("ok"):
+            error = str(data.get("error") or translate(language, "spooler_maintenance.helper_failed"))
+            raise SpoolerMaintenanceError(error)
+        return SpoolerMaintenanceResult(steps=steps)
     finally:
         _cleanup_temp_file(result_file)
         _cleanup_temp_file(events_file)
-
-    steps = [str(item) for item in data.get("steps", [])]
-    if not data.get("ok"):
-        error = str(data.get("error") or translate(language, "spooler_maintenance.helper_failed"))
-        raise SpoolerMaintenanceError(error)
-    return SpoolerMaintenanceResult(steps=steps)
 
 
 def run_spooler_maintenance_helper(
