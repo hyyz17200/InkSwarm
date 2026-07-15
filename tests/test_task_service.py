@@ -11,7 +11,7 @@ from PIL import Image
 
 from printfarm.config_store import ConfigStore
 from printfarm.models import TaskItem
-from printfarm.task_inspector import TaskInspection, TaskInspectionError, inspect_task_input
+from printfarm.task_inspector import TaskInspection, TaskInspectionError, apply_exif_orientation, inspect_task_input
 from printfarm.task_service import TaskService
 
 
@@ -213,6 +213,28 @@ class TaskInspectionLocalizationTests(TestCase):
 
 
 class TaskInspectionExifOrientationTests(TestCase):
+    def test_axis_swapping_orientation_swaps_physical_resolution(self) -> None:
+        image = Image.new("RGB", (40, 20))
+        image.getexif()[0x0112] = 6
+        image.info["dpi"] = (100.0, 200.0)
+        image.info["resolution"] = (300.0, 600.0)
+
+        transposed = apply_exif_orientation(image)
+
+        self.assertEqual(transposed.size, (20, 40))
+        self.assertEqual(transposed.info["dpi"], (200.0, 100.0))
+        self.assertEqual(transposed.info["resolution"], (600.0, 300.0))
+
+    def test_non_axis_swapping_orientation_keeps_physical_resolution(self) -> None:
+        image = Image.new("RGB", (40, 20))
+        image.getexif()[0x0112] = 2
+        image.info["dpi"] = (100.0, 200.0)
+
+        transposed = apply_exif_orientation(image)
+
+        self.assertEqual(transposed.size, (40, 20))
+        self.assertEqual(transposed.info["dpi"], (100.0, 200.0))
+
     def test_exif_orientation_affects_size_and_preview(self) -> None:
         # A camera-style JPEG stored rotated (Orientation=6) must be inspected
         # upright: the mm size and the preview both follow what viewers show.

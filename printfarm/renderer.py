@@ -190,10 +190,9 @@ class Renderer:
         """
         output_icc_path = worker.resolve_path(preset.output_icc) if preset.output_icc else None
         return {
-            # Schema 5: bitmap input applies the EXIF Orientation tag before
-            # rendering, so caches produced by older schemas may hold rotated
-            # pixels and must not be reused.
-            "cache_schema": 5,
+            # Schema 6: EXIF orientations that exchange axes also exchange
+            # non-square DPI/resolution metadata, changing physical page size.
+            "cache_schema": 6,
             "cache_image_format": self.cache_image_format,
             "source": self._source_signature(task.file_path),
             "dpi": int(preset.dpi),

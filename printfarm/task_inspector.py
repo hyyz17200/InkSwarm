@@ -132,7 +132,17 @@ def apply_exif_orientation(image: Image.Image) -> Image.Image:
     if not orientation or orientation == 1:
         return image
     transposed = ImageOps.exif_transpose(image)
-    return transposed if transposed is not None else image
+    if transposed is None:
+        return image
+    if orientation in {5, 6, 7, 8}:
+        # These orientations exchange the pixel axes. Pillow carries image.info
+        # across unchanged, so non-square physical resolution must follow the
+        # same exchange or the upright image gets the wrong millimetre size.
+        for key in ("dpi", "resolution"):
+            value = transposed.info.get(key)
+            if isinstance(value, tuple) and len(value) >= 2:
+                transposed.info[key] = (value[1], value[0], *value[2:])
+    return transposed
 
 
 def get_image_dpi(image: Image.Image) -> tuple[float, float]:
