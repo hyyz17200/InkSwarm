@@ -264,6 +264,7 @@ class PrintHelperProcessTests(unittest.TestCase):
                 time.sleep(0.02)
             self.assertEqual(client._inflight_job, ("Printer P1", 4242))
             killed_proc = client._proc
+            assert killed_proc is not None
 
             client.kill_inflight()
             worker.join(10)
@@ -277,9 +278,11 @@ class PrintHelperProcessTests(unittest.TestCase):
             # ...but unlike terminate(), the client can start a fresh helper.
             # (Compare process objects, not PIDs: Windows reuses PIDs quickly.)
             client.ensure_started()
+            started = client._proc
+            assert started is not None
             self.assertIsNotNone(killed_proc.poll())
-            self.assertIsNot(client._proc, killed_proc)
-            self.assertIsNone(client._proc.poll())
+            self.assertIsNot(started, killed_proc)
+            self.assertIsNone(started.poll())
 
     def test_debug_events_are_relayed_and_not_treated_as_protocol_answers(self) -> None:
         captured: list[str] = []

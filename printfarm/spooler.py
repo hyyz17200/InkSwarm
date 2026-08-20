@@ -64,20 +64,27 @@ class PrinterQueueSnapshot:
     unreachable: str | None = None
 
 
-def read_printer_queue_snapshot(printer_name: str) -> PrinterQueueSnapshot:
+def _require_win32print() -> Any:
+    """Load pywin32 on first use and return the module (never None)."""
     if win32print is None:
         PrinterSpooler.validate_environment()
+    assert win32print is not None
+    return win32print
+
+
+def read_printer_queue_snapshot(printer_name: str) -> PrinterQueueSnapshot:
+    api = _require_win32print()
     try:
-        handle = win32print.OpenPrinter(printer_name)
+        handle = api.OpenPrinter(printer_name)
     except Exception as exc:
         return PrinterQueueSnapshot(printer_name=printer_name, unreachable=str(exc))
     try:
-        info = win32print.GetPrinter(handle, 2)
-        jobs = win32print.EnumJobs(handle, 0, 999, 1)
+        info = api.GetPrinter(handle, 2)
+        jobs = api.EnumJobs(handle, 0, 999, 1)
     except Exception as exc:
         return PrinterQueueSnapshot(printer_name=printer_name, unreachable=str(exc))
     finally:
-        win32print.ClosePrinter(handle)
+        api.ClosePrinter(handle)
     status = int(info.get("Status", 0))
     attributes = int(info.get("Attributes", 0))
     return PrinterQueueSnapshot(
@@ -97,11 +104,10 @@ def list_printers_with_jobs(exclude: set[str] | None = None) -> list[PrinterQueu
     enumeration or per-printer failure degrades to "no warning" rather than
     blocking the maintenance.
     """
-    if win32print is None:
-        PrinterSpooler.validate_environment()
+    api = _require_win32print()
     excluded = set(exclude or ())
     try:
-        printers = win32print.EnumPrinters(PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS, None, 4)
+        printers = api.EnumPrinters(PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS, None, 4)
     except Exception as exc:
         debug_exception("list_printers_with_jobs.enum", exc)
         return []
@@ -123,13 +129,12 @@ def delete_spooler_job(printer_name: str, job_id: int) -> None:
     job was never reported as sent (it counts as failed), so removing it keeps
     what actually reaches paper consistent with the statistics.
     """
-    if win32print is None:
-        PrinterSpooler.validate_environment()
-    handle = win32print.OpenPrinter(printer_name)
+    api = _require_win32print()
+    handle = api.OpenPrinter(printer_name)
     try:
-        win32print.SetJob(handle, int(job_id), 0, None, win32print.JOB_CONTROL_DELETE)
+        api.SetJob(handle, int(job_id), 0, None, api.JOB_CONTROL_DELETE)
     finally:
-        win32print.ClosePrinter(handle)
+        api.ClosePrinter(handle)
 
 
 class PrinterSpooler:
